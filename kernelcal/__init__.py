@@ -6,7 +6,7 @@ with integration hooks for DeepGIS-XR.  Each subpackage corresponds to one
 of the seven integration threads documented in deepgis_maxcal_integration.md.
 
 Companion to: "Kernel Dynamics under Path Entropy Maximization" (Das, ASU)
-Repository:   https://github.com/jnaneshwar-das/kernelcal
+Repository:   https://github.com/darknight-007/kernelcal
 
 Subpackages
 -----------
