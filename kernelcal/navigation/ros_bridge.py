@@ -286,3 +286,222 @@ class KernelcalNavigationNode:
     def destroy(self) -> None:
         self._node.destroy_node()
         rclpy.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# KernelVelocityNode — terrain-aware velocity control
+# ---------------------------------------------------------------------------
+
+class KernelVelocityNode:
+    """ROS2 node: subscribes to ORB-SLAM3 outputs, publishes velocity commands.
+
+    Reads from ros2_ws/src packages:
+      /orb_slam3/tracking_state   (std_msgs/Int32)
+      /orb_slam3/map_points       (sensor_msgs/PointCloud2)
+      /orb_slam3/camera_pose      (geometry_msgs/PoseStamped)
+      /kernelcal/slam_novelty     (std_msgs/Float32, from SemanticSLAMKernelTracker)
+      /kernelcal/patrol_status    (std_msgs/String)
+
+    Publishes to:
+      /kernelcal/velocity_cmd         (std_msgs/Float32)  — scalar forward speed m/s
+      /fmu/in/trajectory_setpoint     (px4_msgs/TrajectorySetpoint) — PX4 offboard
+      /kernelcal/velocity_factors     (std_msgs/Float32MultiArray) — debug factors
+      /kernelcal/velocity_metrics     (std_msgs/String)   — JSON summary
+
+    Parameters
+    ----------
+    v_max : float — maximum forward speed in m/s (default 3.0 for Earth Rover trike)
+    v_crawl : float — speed when tracking is degraded
+    use_px4_setpoint : bool — also publish to /fmu/in/trajectory_setpoint
+    """
+
+    def __init__(
+        self,
+        v_max: float = 3.0,
+        v_crawl: float = 0.3,
+        v_min: float = 0.0,
+        use_px4_setpoint: bool = False,
+        update_rate_hz: float = 10.0,
+    ):
+        if not _ROS_AVAILABLE:
+            raise ImportError("rclpy is required for KernelVelocityNode.")
+
+        from .velocity import (
+            TerrainKernelVelocityController, VelocityBand,
+            map_points_to_kernel, TRACKING_OK, TRACKING_LOST,
+        )
+
+        rclpy.init()
+        self._node = Node("kernelcal_velocity")
+
+        self._ctrl = TerrainKernelVelocityController(
+            band=VelocityBand(v_min=v_min, v_max=v_max, v_crawl=v_crawl),
+            use_look_ahead=True,
+        )
+        self._map_points_to_kernel = map_points_to_kernel
+        self._TRACKING_OK   = TRACKING_OK
+        self._TRACKING_LOST = TRACKING_LOST
+
+        # State
+        self._tracking_state: int = TRACKING_OK
+        self._novelty: float = 0.0
+        self._stability: float = 0.0
+        self._latest_kernel = None
+
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
+        # ── Subscribers ───────────────────────────────────────────────
+        self._node.create_subscription(
+            _ros_import("std_msgs.msg", "Int32"),
+            "/orb_slam3/tracking_state",
+            self._tracking_state_cb, qos,
+        )
+        self._node.create_subscription(
+            _ros_import("sensor_msgs.msg", "PointCloud2"),
+            "/orb_slam3/map_points",
+            self._map_points_cb, qos,
+        )
+        self._node.create_subscription(
+            _ros_import("std_msgs.msg", "Float32"),
+            "/kernelcal/slam_novelty",
+            self._novelty_cb, qos,
+        )
+        self._node.create_subscription(
+            _ros_import("std_msgs.msg", "Float32"),
+            "/kernelcal/map_stability",
+            self._stability_cb, qos,
+        )
+
+        # ── Publishers ────────────────────────────────────────────────
+        self._v_pub = self._node.create_publisher(
+            _ros_import("std_msgs.msg", "Float32"), "/kernelcal/velocity_cmd", 10
+        )
+        self._factors_pub = self._node.create_publisher(
+            _ros_import("std_msgs.msg", "Float32MultiArray"),
+            "/kernelcal/velocity_factors", 10,
+        )
+        self._metrics_pub = self._node.create_publisher(
+            _ros_import("std_msgs.msg", "String"), "/kernelcal/velocity_metrics", 10
+        )
+        self._use_px4 = use_px4_setpoint
+        if use_px4_setpoint:
+            try:
+                TrajectorySetpoint = _ros_import("px4_msgs.msg", "TrajectorySetpoint")
+                self._px4_pub = self._node.create_publisher(
+                    TrajectorySetpoint, "/fmu/in/trajectory_setpoint", 10
+                )
+            except Exception as e:
+                self._node.get_logger().warn(
+                    f"px4_msgs not available, disabling PX4 setpoint: {e}"
+                )
+                self._use_px4 = False
+
+        self._timer = self._node.create_timer(
+            1.0 / update_rate_hz, self._update_cb
+        )
+        self._node.get_logger().info("KernelVelocityNode initialised.")
+
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
+
+    def _tracking_state_cb(self, msg) -> None:
+        self._tracking_state = int(msg.data)
+
+    def _novelty_cb(self, msg) -> None:
+        self._novelty = float(msg.data)
+
+    def _stability_cb(self, msg) -> None:
+        self._stability = float(msg.data)
+
+    def _map_points_cb(self, msg) -> None:
+        """Convert PointCloud2 to numpy xyz and build local kernel."""
+        try:
+            import struct
+            pts = []
+            point_step = msg.point_step
+            for i in range(msg.width):
+                offset = i * point_step
+                x, y, z = struct.unpack_from("fff", msg.data, offset)
+                pts.append([x, y, z])
+            if pts:
+                self._latest_kernel = self._map_points_to_kernel(
+                    np.array(pts), fov_radius=5.0, n_sample=50
+                )
+        except Exception as e:
+            self._node.get_logger().warn(f"map_points decode error: {e}")
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+
+    def _update_cb(self) -> None:
+        import json
+        Float32     = _ros_import("std_msgs.msg", "Float32")
+        Float32MA   = _ros_import("std_msgs.msg", "Float32MultiArray")
+        StringMsg   = _ros_import("std_msgs.msg", "String")
+
+        v_cmd = self._ctrl.update(
+            novelty=self._novelty,
+            stability=self._stability,
+            current_kernel=self._latest_kernel,
+            tracking_state=self._tracking_state,
+        )
+
+        # Publish scalar velocity
+        v_msg = Float32()
+        v_msg.data = v_cmd
+        self._v_pub.publish(v_msg)
+
+        # Publish PX4 setpoint if enabled
+        if self._use_px4:
+            sp = _ros_import("px4_msgs.msg", "TrajectorySetpoint")()
+            sp.timestamp = int(self._node.get_clock().now().nanoseconds / 1000)
+            # Forward velocity only — heading maintained by existing yaw controller
+            sp.velocity[0] = v_cmd   # NED x = forward
+            sp.velocity[1] = 0.0
+            sp.velocity[2] = 0.0
+            sp.yawspeed = float("nan")
+            self._px4_pub.publish(sp)
+
+        # Publish factor decomposition for debugging
+        factors = self._ctrl.factor_histories()
+        fma_msg = Float32MA()
+        if factors["novelty_factor"].size > 0:
+            fma_msg.data = [
+                float(factors["novelty_factor"][-1]),
+                float(factors["stability_factor"][-1]),
+                float(factors["complexity_factor"][-1]),
+                float(factors["tracking_factor"][-1]),
+            ]
+        self._factors_pub.publish(fma_msg)
+
+        # JSON metrics
+        metrics = self._ctrl.summary()
+        metrics["v_cmd"] = v_cmd
+        metrics["tracking_state"] = self._tracking_state
+        m_msg = StringMsg()
+        m_msg.data = json.dumps(metrics, default=float)
+        self._metrics_pub.publish(m_msg)
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def spin(self) -> None:
+        rclpy.spin(self._node)
+
+    def destroy(self) -> None:
+        self._node.destroy_node()
+        rclpy.shutdown()
+
+
+def _ros_import(module: str, cls: str):
+    """Lazy import helper for optional ROS message types."""
+    import importlib
+    return getattr(importlib.import_module(module), cls)
