@@ -82,6 +82,11 @@ from .thermodynamics import (
 )
 from .models import ModelKernelSelector, ModelRecord
 from .prompts import PromptKernelIterator, prompt_kernel_distance
+from .navigation import (
+    SemanticSLAMKernelTracker,
+    InformativePathPlanner,
+    RiderDemonstrationLearner,
+)
 
 __version__ = "0.1.0"
 
@@ -120,4 +125,8 @@ __all__ = [
     # prompts
     "PromptKernelIterator",
     "prompt_kernel_distance",
+    # navigation
+    "SemanticSLAMKernelTracker",
+    "InformativePathPlanner",
+    "RiderDemonstrationLearner",
 ]
