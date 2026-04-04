@@ -2,6 +2,12 @@
 
 **Kernel dynamics under Maximum Caliber — variational tools for representational change, thermodynamic bounds, and adaptive sampling.**
 
+[![arXiv](https://img.shields.io/badge/arXiv-2603.27880-b31b1b.svg)](https://arxiv.org/abs/2603.27880)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+
+> **Status:** research companion library, v0.1.0 — pre-publication, API subject to change.
+
 Companion library to:
 
 > **Kernel Dynamics under Path Entropy Maximization**
@@ -33,14 +39,22 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 ```bash
 git clone https://github.com/darknight-007/kernelcal.git
 cd kernelcal
-pip install numpy scipy
+pip install -e .
 ```
 
-PyTorch is optional — required only for `kernelcal.ntk.compute_empirical_ntk` on live models.
+PyTorch is optional — required only for `kernelcal.ntk.compute_empirical_ntk` on live models:
+
+```bash
+pip install -e ".[torch]"
+```
 
 ---
 
 ## Quick start
+
+> The code snippets below are schematic — variables such as `reward_scores`,
+> `kernel_snapshots`, and `embeddings_per_tile` represent arrays you supply
+> from your own pipeline.
 
 ### MaxCal adaptive sampler
 
@@ -50,19 +64,19 @@ Replaces the heuristic update in the [DeepGIS World Sampler](https://github.com/
 import numpy as np
 from kernelcal.maxcal import MaxCalSampler
 
-# Grid of (lon, lat) candidate locations
-locations = np.random.rand(200, 2)
+# (N, 2) array of (lon, lat) candidate locations
+locations = np.array([...])
 
 sampler = MaxCalSampler(locations)
 
-# Update from reward feedback (e.g. anomaly scores from SAM)
+# Update from reward feedback — e.g. anomaly scores from SAM detections
 sampler.update(feedback=reward_scores)
 
 # Sample next survey locations
 next_locations = sampler.sample(n=10)
 
 print(sampler.statistics())
-# {'entropy_nats': ..., 'is_fixed_point': False, 'classification': 'transient', ...}
+# {'entropy_nats': 4.31, 'is_fixed_point': False, 'classification': 'transient', ...}
 ```
 
 ### Kernel trajectory and fixed-point detection
@@ -96,7 +110,7 @@ result = check_landauer_bound(
     K2=ntk_after,
 )
 print(result)
-# {'delta_I_nats': ..., 'landauer_bound_joules': ..., 'bound_satisfied': True, ...}
+# {'delta_I_nats': 0.42, 'landauer_bound_joules': 1.73e-21, 'bound_satisfied': True, ...}
 ```
 
 ### NTK–Hellinger comparison (Conjecture 3)
@@ -111,7 +125,6 @@ for step, batch in enumerate(loader):
     if step % 100 == 0:
         tracker.record(step, model)
 
-# Test whether NTK converges to Hellinger kernel
 softmax_outputs = model(X_probe).softmax(dim=-1).detach().numpy()
 result = compare_ntk_to_hellinger(tracker.final_kernel(), softmax_outputs)
 print(f"HS distance to Hellinger kernel: {result['hs_distance']:.4f}")
@@ -122,7 +135,7 @@ print(f"HS distance to Hellinger kernel: {result['hs_distance']:.4f}")
 ```python
 from kernelcal.assembly import complexity_map, assembly_reward_signal
 
-# embeddings_per_tile: list of (M_i, D) SAM / Grounding DINO feature arrays
+# embeddings_per_tile: list of (M_i, D) feature arrays from SAM / Grounding DINO
 scores  = complexity_map(embeddings_per_tile)
 rewards = assembly_reward_signal(scores, coverage_counts=visit_counts)
 
@@ -135,7 +148,7 @@ sampler.update(feedback=rewards)
 from kernelcal.prompts import PromptKernelIterator
 
 iterator = PromptKernelIterator(
-    detector_fn=grounding_dino_detect,   # (image, prompt) → list[dict]
+    detector_fn=grounding_dino_detect,   # callable: (image, prompt) → list[dict]
     max_steps=15,
     tol=1e-2,
 )
@@ -190,7 +203,7 @@ kernelcal/
 
 ## DeepGIS-XR integration
 
-Full integration analysis: [`deepgis_maxcal_integration.md`](deepgis_maxcal_integration.md)
+Full integration analysis: [`INTEGRATION.md`](INTEGRATION.md)
 
 Seven integration threads mapped to DeepGIS-XR components:
 
@@ -214,7 +227,7 @@ Seven integration threads mapped to DeepGIS-XR components:
 
 ## License
 
-[MIT](LICENSE) — see the [philosophical justification](deepgis_maxcal_integration.md) in the integration notes.
+[MIT](LICENSE)
 
 ---
 
