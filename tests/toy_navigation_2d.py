@@ -8,7 +8,8 @@ A 10×10 grid of waypoints represents a field site.  Two clusters of "interestin
 terrain (high feature complexity) sit at opposite corners.  A third obstacle
 cluster sits near the centre.
 
-The script runs four phases and records wall-clock time for each kernelcal call:
+The script runs four phases and records wall-clock time, CPU time, and memory
+allocation (and GPU utilisation when available) for every kernelcal call:
 
   1. SLAM warm-up   — SemanticSLAMKernelTracker ingests synthetic descriptor
                       frames as the rover sweeps across the grid.
@@ -28,6 +29,7 @@ Outputs (saved in tests/figures/)
   fig5_pilot_transfer.png   — learned λ, transferred vs. autonomous distribution
   fig6_compute.png          — wall-clock time per kernelcal call (all phases)
   fig7_kernel_stability.png — stability score & fixed-point flag over time
+  fig8_cpu_gpu.png          — CPU time, memory allocation, and GPU telemetry
 
 Run
 ---
@@ -40,6 +42,8 @@ import time
 import tracemalloc
 from pathlib import Path
 from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 import numpy as np
 import matplotlib
@@ -57,6 +61,101 @@ from kernelcal.navigation.planner import InformativePathPlanner
 from kernelcal.navigation.pilot import HumanPilotDemonstrationLearner
 
 # ──────────────────────────────────────────────────────────────────────────────
+# GPU probe (optional — graceful fallback when no CUDA device present)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_GPU_AVAILABLE = False
+_nvml_handle = None
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+    _GPU_AVAILABLE = True
+    print(f"GPU: {pynvml.nvmlDeviceGetName(_nvml_handle).decode()}")
+except Exception:
+    pass
+
+if not _GPU_AVAILABLE:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            _GPU_AVAILABLE = True
+            print(f"GPU (torch): {torch.cuda.get_device_name(0)}")
+    except ImportError:
+        pass
+
+def _gpu_snapshot() -> dict:
+    """Return current GPU utilisation (%), memory used (MiB), and power (W)."""
+    if _nvml_handle is not None:
+        try:
+            util  = pynvml.nvmlDeviceGetUtilizationRates(_nvml_handle)
+            mem   = pynvml.nvmlDeviceGetMemoryInfo(_nvml_handle)
+            power = pynvml.nvmlDeviceGetPowerUsage(_nvml_handle) / 1000.0
+            return {
+                "util_pct":  util.gpu,
+                "mem_mib":   mem.used / 1024**2,
+                "power_w":   power,
+            }
+        except Exception:
+            pass
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return {
+                "util_pct": 0.0,
+                "mem_mib":  torch.cuda.memory_allocated(0) / 1024**2,
+                "power_w":  0.0,
+            }
+    except ImportError:
+        pass
+    return {"util_pct": 0.0, "mem_mib": 0.0, "power_w": 0.0}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Profiling context manager
+# ──────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class ProfileResult:
+    wall_s:   float = 0.0   # wall-clock seconds
+    cpu_s:    float = 0.0   # process CPU seconds
+    mem_kb:   float = 0.0   # peak memory delta (KB) during the call
+    gpu_util: float = 0.0   # GPU utilisation % (snapshot before/after average)
+    gpu_mem:  float = 0.0   # GPU memory used MiB (after)
+    gpu_pow:  float = 0.0   # GPU power W (snapshot after)
+
+
+class _Profiler:
+    """Context manager: measures wall, CPU, memory, and GPU for one call."""
+
+    result: ProfileResult
+
+    def __enter__(self):
+        self.result = ProfileResult()
+        tracemalloc.start()
+        self._gpu0 = _gpu_snapshot()
+        self._t_wall = time.perf_counter()
+        self._t_cpu  = time.process_time()
+        return self
+
+    def __exit__(self, *_):
+        self.result.wall_s = time.perf_counter() - self._t_wall
+        self.result.cpu_s  = time.process_time()  - self._t_cpu
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        self.result.mem_kb = peak / 1024.0
+        gpu1 = _gpu_snapshot()
+        self.result.gpu_util = (self._gpu0["util_pct"] + gpu1["util_pct"]) / 2
+        self.result.gpu_mem  = gpu1["mem_mib"]
+        self.result.gpu_pow  = gpu1["power_w"]
+
+
+def _profile() -> _Profiler:
+    return _Profiler()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -71,7 +170,7 @@ RNG = np.random.default_rng(42)
 
 
 def _timer():
-    """Return a context manager that records elapsed seconds."""
+    """Thin wrapper kept for backward compat — delegates to _Profiler."""
     class _T:
         elapsed = 0.0
         def __enter__(self): self._t0 = time.perf_counter(); return self
@@ -130,6 +229,10 @@ tracker = SemanticSLAMKernelTracker(
 )
 
 slam_times = []
+slam_cpu   = []
+slam_mem   = []
+slam_gpu_util = []
+slam_gpu_mem  = []
 novelty_history = []
 stability_history = []
 loop_closure_history = []
@@ -139,9 +242,14 @@ complexity_history = []
 sweep_order = np.arange(N_WP)
 for step, idx in enumerate(sweep_order):
     descs = make_descriptors(idx, t=float(step))
-    with _timer() as T:
+    with _profile() as P:
         novelty = tracker.update(descs, keyframe_id=idx)
-    slam_times.append(T.elapsed)
+    slam_times.append(P.result.wall_s)
+    slam_cpu.append(P.result.cpu_s)
+    slam_mem.append(P.result.mem_kb)
+    slam_gpu_util.append(P.result.gpu_util)
+    slam_gpu_mem.append(P.result.gpu_mem)
+
     novelty_history.append(novelty)
     stability_history.append(tracker.map_stability_score())
     complexity_history.append(tracker.current_complexity())
@@ -177,7 +285,11 @@ planner = InformativePathPlanner(
     fixed_point_window=6,
 )
 
-plan_times = []
+plan_times    = []
+plan_cpu      = []
+plan_mem      = []
+plan_gpu_util = []
+plan_gpu_mem  = []
 dist_snapshots = []    # (step, distribution)
 battery_history = []
 visit_path = []        # indices of visited waypoints
@@ -193,14 +305,18 @@ for step in range(N_PLAN_STEPS):
     semantic_scores = GT_COMPLEXITY.copy()
     semantic_scores[OBSTACLES] = 0.0   # obstacles have zero appeal
 
-    with _timer() as T:
+    with _profile() as P:
         planner.update(
             battery_joules_remaining=battery,
             semantic_scores=semantic_scores,
         )
         wp = planner.next_waypoint()
 
-    plan_times.append(T.elapsed)
+    plan_times.append(P.result.wall_s)
+    plan_cpu.append(P.result.cpu_s)
+    plan_mem.append(P.result.mem_kb)
+    plan_gpu_util.append(P.result.gpu_util)
+    plan_gpu_mem.append(P.result.gpu_mem)
     battery_history.append(battery)
     stability_plan_history.append(planner.patrol_stability_score())
 
@@ -264,15 +380,18 @@ learner = HumanPilotDemonstrationLearner(
 )
 
 pilot_times = []
+pilot_mem   = []
 for route in [pilot_route_1(), pilot_route_2(),
               pilot_route_1()[::-1], pilot_route_2()[::-1]]:
-    with _timer() as T:
+    with _profile() as P:
         learner.add_demonstration(route)
-    pilot_times.append(T.elapsed)
+    pilot_times.append(P.result.wall_s)
+    pilot_mem.append(P.result.mem_kb)
 
-with _timer() as T:
+with _profile() as P:
     lambdas = learner.fit()
-pilot_times.append(T.elapsed)
+pilot_times.append(P.result.wall_s)
+pilot_mem.append(P.result.mem_kb)
 
 print(f"  Learned λ: {learner.learned_preferences()}")
 print(f"  Log-likelihood: {learner.log_likelihood():.4f}")
@@ -288,9 +407,10 @@ print("Phase 4: Transferring pilot preferences …")
 new_wps = WAYPOINTS + RNG.uniform(-0.05, 0.05, WAYPOINTS.shape)
 new_wps = new_wps.clip(0, 1)
 
-with _timer() as T:
+with _profile() as P:
     transferred_planner = learner.make_planner(new_wps)
-transfer_time = T.elapsed
+transfer_time    = P.result.wall_s
+transfer_mem_kb  = P.result.mem_kb
 
 pilot_dist = learner.distribution()
 transferred_dist = transferred_planner.distribution()
@@ -664,23 +784,211 @@ print("  Saved fig7_kernel_stability.png")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 13. Summary
+# 13. Figure 8 — CPU / GPU / Memory deep profile
 # ──────────────────────────────────────────────────────────────────────────────
 
+steps_slam = np.arange(N_WP)
+steps_plan = np.arange(N_PLAN_STEPS)
+
+fig8 = plt.figure(figsize=(16, 14))
+fig8.suptitle(
+    "kernelcal CPU / GPU / Memory Profile"
+    + (" (GPU present)" if _GPU_AVAILABLE else " (CPU only — no GPU detected)"),
+    fontsize=14, fontweight="bold",
+)
+gs = gridspec.GridSpec(4, 3, figure=fig8, hspace=0.55, wspace=0.38)
+
+# ── Row 0: wall-clock breakdown ──────────────────────────────────────────────
+ax = fig8.add_subplot(gs[0, :2])
+ax.plot(steps_slam, np.array(slam_times) * 1e3,
+        color="steelblue", lw=1.2, alpha=0.8, label="SLAM update")
+ax.axhline(np.mean(slam_times) * 1e3, ls="--", c="steelblue", lw=1.2,
+           label=f"SLAM mean {np.mean(slam_times)*1e3:.2f} ms")
+ax2 = ax.twinx()
+ax2.plot(steps_plan, np.array(plan_times) * 1e3,
+         color="seagreen", lw=1.2, alpha=0.8, label="Planner update")
+ax2.axhline(np.mean(plan_times) * 1e3, ls="--", c="seagreen", lw=1.2,
+            label=f"Planner mean {np.mean(plan_times)*1e3:.2f} ms")
+ax.set_xlabel("Step"); ax.set_ylabel("SLAM latency (ms)", color="steelblue")
+ax2.set_ylabel("Planner latency (ms)", color="seagreen")
+ax.set_title("Wall-clock latency per call")
+lines1, labels1 = ax.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax.legend(lines1 + lines2, labels1 + labels2, fontsize=7, loc="upper right")
+ax.grid(True, alpha=0.3)
+
+# ── Row 0 col 2: CPU vs wall-clock scatter ──────────────────────────────────
+ax = fig8.add_subplot(gs[0, 2])
+ax.scatter(np.array(slam_times) * 1e3, np.array(slam_cpu) * 1e3,
+           s=18, c="steelblue", alpha=0.6, label="SLAM")
+ax.scatter(np.array(plan_times) * 1e3, np.array(plan_cpu) * 1e3,
+           s=18, c="seagreen", alpha=0.6, label="Planner")
+_lim = max(np.array(slam_times + plan_times).max() * 1e3,
+           np.array(slam_cpu + plan_cpu).max() * 1e3) * 1.1
+ax.plot([0, _lim], [0, _lim], "k--", lw=0.8, label="CPU=Wall (ideal)")
+ax.set_xlabel("Wall-clock (ms)"); ax.set_ylabel("CPU time (ms)")
+ax.set_title("CPU time vs wall-clock\n(below line = waiting / memory)")
+ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+ax.set_xlim(0); ax.set_ylim(0)
+
+# ── Row 1: CPU time series ───────────────────────────────────────────────────
+ax = fig8.add_subplot(gs[1, :2])
+ax.plot(steps_slam, np.array(slam_cpu) * 1e3,
+        color="steelblue", lw=1.1, alpha=0.8, label="SLAM CPU")
+ax2 = ax.twinx()
+ax2.plot(steps_plan, np.array(plan_cpu) * 1e3,
+         color="seagreen", lw=1.1, alpha=0.8, label="Planner CPU")
+ax.set_xlabel("Step"); ax.set_ylabel("SLAM CPU (ms)", color="steelblue")
+ax2.set_ylabel("Planner CPU (ms)", color="seagreen")
+ax.set_title("CPU time per call (process_time)")
+ax.grid(True, alpha=0.3)
+lines1, labels1 = ax.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax.legend(lines1 + lines2, labels1 + labels2, fontsize=7, loc="upper right")
+
+# ── Row 1 col 2: CPU efficiency ratio ───────────────────────────────────────
+ax = fig8.add_subplot(gs[1, 2])
+slam_eff  = np.array(slam_cpu)  / (np.array(slam_times)  + 1e-12)
+plan_eff  = np.array(plan_cpu)  / (np.array(plan_times)  + 1e-12)
+ax.hist(slam_eff.clip(0, 1.5), bins=20, color="steelblue", alpha=0.6,
+        label="SLAM", density=True)
+ax.hist(plan_eff.clip(0, 1.5), bins=20, color="seagreen",  alpha=0.6,
+        label="Planner", density=True)
+ax.axvline(1.0, ls="--", c="red", lw=1, label="100% CPU utilisation")
+ax.set_xlabel("CPU / wall ratio"); ax.set_ylabel("Density")
+ax.set_title("CPU utilisation distribution")
+ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+
+# ── Row 2: Memory ────────────────────────────────────────────────────────────
+ax = fig8.add_subplot(gs[2, :2])
+ax.fill_between(steps_slam, np.array(slam_mem),
+                color="steelblue", alpha=0.35, label="SLAM peak mem")
+ax.plot(steps_slam, np.array(slam_mem), color="steelblue", lw=0.8)
+ax2 = ax.twinx()
+ax2.fill_between(steps_plan, np.array(plan_mem),
+                 color="seagreen", alpha=0.35, label="Planner peak mem")
+ax2.plot(steps_plan, np.array(plan_mem), color="seagreen", lw=0.8)
+ax.set_xlabel("Step")
+ax.set_ylabel("SLAM peak mem (KB)", color="steelblue")
+ax2.set_ylabel("Planner peak mem (KB)", color="seagreen")
+ax.set_title("tracemalloc peak memory allocation per call")
+ax.grid(True, alpha=0.3)
+lines1, labels1 = ax.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax.legend(lines1 + lines2, labels1 + labels2, fontsize=7)
+
+# ── Row 2 col 2: per-phase memory bar ───────────────────────────────────────
+ax = fig8.add_subplot(gs[2, 2])
+phase_names  = ["SLAM\n(mean/call)", "Planner\n(mean/call)",
+                "Pilot\nadd×4", "Pilot\nfit", "Transfer"]
+phase_mem_kb = [
+    float(np.mean(slam_mem)),
+    float(np.mean(plan_mem)),
+    float(np.mean(pilot_mem[:4])),
+    float(pilot_mem[4]),
+    float(transfer_mem_kb),
+]
+colors_bar = ["steelblue", "seagreen", "gold", "darkorange", "mediumpurple"]
+bars = ax.bar(phase_names, phase_mem_kb, color=colors_bar, edgecolor="k", lw=0.7)
+for bar, val in zip(bars, phase_mem_kb):
+    ax.text(bar.get_x() + bar.get_width() / 2,
+            val + max(phase_mem_kb) * 0.01,
+            f"{val:.0f}", ha="center", va="bottom", fontsize=7)
+ax.set_ylabel("Peak mem (KB)")
+ax.set_title("Memory per phase")
+ax.grid(True, alpha=0.3, axis="y")
+
+# ── Row 3: GPU (or placeholder) ─────────────────────────────────────────────
+if _GPU_AVAILABLE and any(v > 0 for v in slam_gpu_util + plan_gpu_util):
+    ax = fig8.add_subplot(gs[3, :2])
+    ax.plot(steps_slam, slam_gpu_util, color="tomato", lw=1.2, label="SLAM GPU util %")
+    ax.plot(steps_plan, plan_gpu_util, color="darkorange", lw=1.2, label="Planner GPU util %")
+    ax.set_xlabel("Step"); ax.set_ylabel("GPU utilisation (%)")
+    ax.set_title("GPU utilisation during kernelcal calls")
+    ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+
+    ax = fig8.add_subplot(gs[3, 2])
+    ax.plot(steps_slam, slam_gpu_mem, color="mediumpurple", lw=1.2, label="SLAM")
+    ax.plot(steps_plan, plan_gpu_mem, color="royalblue",    lw=1.2, label="Planner")
+    ax.set_xlabel("Step"); ax.set_ylabel("GPU memory (MiB)")
+    ax.set_title("GPU memory footprint")
+    ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+else:
+    ax = fig8.add_subplot(gs[3, :])
+    ax.set_axis_off()
+
+    # Summary table showing all metrics numerically
+    col_labels = ["Metric", "SLAM update", "Planner update", "Pilot fit", "Transfer"]
+    rows = [
+        ["Wall mean (ms)",
+         f"{np.mean(slam_times)*1e3:.3f}",
+         f"{np.mean(plan_times)*1e3:.3f}",
+         f"{pilot_times[-1]*1e3:.3f}",
+         f"{transfer_time*1e3:.3f}"],
+        ["CPU mean (ms)",
+         f"{np.mean(slam_cpu)*1e3:.3f}",
+         f"{np.mean(plan_cpu)*1e3:.3f}",
+         "—", "—"],
+        ["CPU/wall ratio",
+         f"{np.mean(slam_eff):.2f}",
+         f"{np.mean(plan_eff):.2f}",
+         "—", "—"],
+        ["Peak mem (KB)",
+         f"{np.mean(slam_mem):.0f}",
+         f"{np.mean(plan_mem):.0f}",
+         f"{pilot_mem[-1]:.0f}",
+         f"{transfer_mem_kb:.0f}"],
+        ["GPU util (%)",
+         "n/a", "n/a", "n/a", "n/a"],
+    ]
+    tbl = ax.table(
+        cellText=rows,
+        colLabels=col_labels,
+        cellLoc="center",
+        loc="center",
+        bbox=[0.0, 0.0, 1.0, 1.0],
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9)
+    for (r, c), cell in tbl.get_celld().items():
+        if r == 0:
+            cell.set_facecolor("#2c3e50")
+            cell.set_text_props(color="white", fontweight="bold")
+        elif r % 2 == 0:
+            cell.set_facecolor("#ecf0f1")
+    ax.set_title("Numeric summary — CPU only (no GPU detected)", pad=12)
+
+fig8.savefig(FIGURES / "fig8_cpu_gpu.png", dpi=150, bbox_inches="tight")
+plt.close(fig8)
+print("  Saved fig8_cpu_gpu.png")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 15. Summary
+# ──────────────────────────────────────────────────────────────────────────────
+
+slam_eff_mean  = float(np.mean(np.array(slam_cpu) / (np.array(slam_times) + 1e-12)))
+plan_eff_mean  = float(np.mean(np.array(plan_cpu) / (np.array(plan_times) + 1e-12)))
+
 print()
-print("=" * 58)
+print("=" * 65)
 print("Toy scenario summary")
-print("=" * 58)
-print(f"  SLAM frames processed :  {N_WP}")
-print(f"  Mean SLAM latency      :  {np.mean(slam_times)*1e3:.2f} ms")
-print(f"  Planner steps          :  {N_PLAN_STEPS}")
-print(f"  Mean planner latency   :  {np.mean(plan_times)*1e3:.2f} ms")
-print(f"  Pilot demos            :  {len(learner._demonstrations)}")
-print(f"  Fit time               :  {pilot_times[-1]*1e3:.2f} ms")
-print(f"  Transfer time          :  {transfer_time*1e3:.2f} ms")
-print(f"  Learned λ              :  {dict(zip(prefs.keys(), lambdas.round(3)))}")
-print(f"  Final stability score  :  {stability_plan_history[-1]:.3f}")
-print(f"  Patrol classification  :  {planner.classify()}")
+print("=" * 65)
+print(f"  SLAM frames processed  :  {N_WP}")
+print(f"  Mean SLAM wall          :  {np.mean(slam_times)*1e3:.3f} ms")
+print(f"  Mean SLAM CPU           :  {np.mean(slam_cpu)*1e3:.3f} ms  (CPU/wall {slam_eff_mean:.2f})")
+print(f"  Mean SLAM peak mem      :  {np.mean(slam_mem):.0f} KB")
+print(f"  Planner steps           :  {N_PLAN_STEPS}")
+print(f"  Mean planner wall       :  {np.mean(plan_times)*1e3:.3f} ms")
+print(f"  Mean planner CPU        :  {np.mean(plan_cpu)*1e3:.3f} ms  (CPU/wall {plan_eff_mean:.2f})")
+print(f"  Mean planner peak mem   :  {np.mean(plan_mem):.0f} KB")
+print(f"  Pilot demos             :  {len(learner._demonstrations)}")
+print(f"  Fit wall / peak mem     :  {pilot_times[-1]*1e3:.2f} ms  /  {pilot_mem[-1]:.0f} KB")
+print(f"  Transfer wall / mem     :  {transfer_time*1e3:.2f} ms  /  {transfer_mem_kb:.0f} KB")
+print(f"  GPU available           :  {_GPU_AVAILABLE}")
+print(f"  Learned λ               :  {dict(zip(prefs.keys(), lambdas.round(3)))}")
+print(f"  Final stability score   :  {stability_plan_history[-1]:.3f}")
+print(f"  Patrol classification   :  {planner.classify()}")
 print()
 print(f"  Figures saved to: {FIGURES}/")
-print("=" * 58)
+print("=" * 65)
