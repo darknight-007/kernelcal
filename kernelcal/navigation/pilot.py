@@ -1,13 +1,13 @@
 """
-Inverse MaxCal from rider demonstrations.
+Inverse MaxCal from human-pilot demonstrations.
 
-The rider's recorded paths are observations from an implicit MaxCal distribution.
+The human pilot's recorded paths are observations from an implicit MaxCal distribution.
 This module recovers the Lagrange multipliers λ that make the MaxCal distribution
 most consistent with the demonstrated trajectories — effectively learning the
-rider's implicit constraints (energy preference, novelty-seeking, obstacle avoidance).
+pilot's implicit constraints (energy preference, novelty-seeking, obstacle avoidance).
 
-Once learned, λ can be transferred to new terrain: the rover generates rider-consistent
-paths in places the rider has never visited.
+Once learned, λ can be transferred to new terrain: the rover generates
+human-pilot-consistent paths in places the pilot has never visited.
 
 Maps to Thread 3 of NAVIGATION.md.
 
@@ -66,8 +66,8 @@ def path_feature_vector(
 # Inverse MaxCal learner
 # ---------------------------------------------------------------------------
 
-class RiderDemonstrationLearner:
-    """Recovers Lagrange multipliers from rider-demonstrated paths.
+class HumanPilotDemonstrationLearner:
+    """Recovers Lagrange multipliers from human-pilot-demonstrated paths.
 
     The inverse MaxCal objective:
         max_λ  Σ_{demo} log p_λ[γ_demo]
@@ -113,7 +113,7 @@ class RiderDemonstrationLearner:
     # Data ingestion
     # ------------------------------------------------------------------
 
-    def add_demonstration(self, path_indices: np.ndarray) -> "RiderDemonstrationLearner":
+    def add_demonstration(self, path_indices: np.ndarray) -> "HumanPilotDemonstrationLearner":
         """Add one demonstrated path as a sequence of waypoint indices.
 
         Parameters
@@ -126,7 +126,7 @@ class RiderDemonstrationLearner:
     def add_demonstration_from_positions(
         self,
         positions: np.ndarray,
-    ) -> "RiderDemonstrationLearner":
+    ) -> "HumanPilotDemonstrationLearner":
         """Add a demonstration given (T, 2) lon/lat positions.
 
         Maps each position to the nearest candidate waypoint.
@@ -204,11 +204,11 @@ class RiderDemonstrationLearner:
         energy_budget_joules: float = 100_000.0,
         joules_per_metre: float = 50.0,
     ) -> InformativePathPlanner:
-        """Create an InformativePathPlanner that uses the learned rider preferences.
+        """Create an InformativePathPlanner that uses the learned human-pilot preferences.
 
         The learned λ values are used as the initial Lagrange multipliers for the
-        new planner's MaxCalSampler, biasing it toward rider-consistent paths in
-        the new terrain.
+        new planner's MaxCalSampler, biasing it toward human-pilot-consistent paths
+        in the new terrain.
 
         Parameters
         ----------
@@ -228,7 +228,7 @@ class RiderDemonstrationLearner:
         new_F = np.column_stack([
             fn(candidate_waypoints) for fn in self.feature_fns
         ])
-        learned_scores = -new_F @ self._lambdas  # higher = rider-preferred
+        learned_scores = -new_F @ self._lambdas  # higher = pilot-preferred
         learned_scores -= learned_scores.min()
 
         planner.update(semantic_scores=learned_scores)
@@ -239,7 +239,7 @@ class RiderDemonstrationLearner:
     # ------------------------------------------------------------------
 
     def learned_preferences(self) -> dict:
-        """Return a human-readable description of learned Lagrange multipliers."""
+        """Return a description of the learned pilot Lagrange multipliers."""
         if self._lambdas is None:
             return {"status": "not fitted"}
         fn_names = [getattr(fn, "__name__", f"feature_{i}")
@@ -264,7 +264,7 @@ class RiderDemonstrationLearner:
 
     def __repr__(self) -> str:
         return (
-            f"RiderDemonstrationLearner("
+            f"HumanPilotDemonstrationLearner("
             f"n_demos={len(self._demonstrations)}, "
             f"n_features={len(self.feature_fns)}, "
             f"fitted={self._lambdas is not None})"

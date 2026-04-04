@@ -13,7 +13,7 @@ the vehicle follows GPS waypoints or a learned path, but the *kernel* — the fe
 structure that determines which differences in the environment are actionable — is fixed
 at design time and never updated in the field.
 
-Kernel dynamics closes this loop. The rider, the SLAM system, the semantic detector, and
+Kernel dynamics closes this loop. The human pilot, the SLAM system, the semantic detector, and
 the energy budget all produce signals that should evolve the navigation kernel over time.
 MaxCal governs *how* it evolves: the path through kernel space that maximises entropy
 subject to the constraints actually observed in the field.
@@ -74,7 +74,7 @@ print(tracker.is_well_mapped())         # fixed-point condition
 
 ### Current state
 The rover executes GPS waypoint missions planned in QGroundControl, or replays a
-learned rider path. There is no onboard mechanism for selecting *which* locations to
+learned human-pilot path. There is no onboard mechanism for selecting *which* locations to
 visit based on expected information gain.
 
 ### kernelcal connection
@@ -119,47 +119,47 @@ print(planner.is_at_fixed_point())   # True = stable optimal patrol found
 
 ---
 
-## Thread 3 — Learning from the rider (inverse MaxCal)
+## Thread 3 — Learning from the human pilot (inverse MaxCal)
 
 ### Current state
-The rover can record and replay a rider's path. This is pure imitation — no
-generalisation, no understanding of *why* the rider chose that path.
+The rover can record and replay a human pilot's path. This is pure imitation — no
+generalisation, no understanding of *why* the pilot chose that path.
 
 ### kernelcal connection
-The rider's demonstrated trajectory is a sample from the rider's implicit path
+The pilot's demonstrated trajectory is a sample from the pilot's implicit path
 distribution. Inverse MaxCal recovers the Lagrange multipliers that make the
 MaxCal distribution most consistent with the demonstrated path:
 
-    p_rider[γ] ∝ q[γ] exp(−λ · f(γ))
+    p_pilot[γ] ∝ q[γ] exp(−λ · f(γ))
 
 where `f(γ)` are observable features of the path (energy used, semantic novelty
 encountered, obstacles avoided, speed profile) and `λ` are learned from the
 demonstration.
 
 **What this recovers:**
-- `λ_energy` — how much the rider penalises energy expenditure per unit of
+- `λ_energy` — how much the pilot penalises energy expenditure per unit of
   information gain: their implicit *thermodynamic efficiency preference*
 - `λ_obstacle` — implicit obstacle avoidance cost kernel
-- `λ_novelty` — how strongly the rider seeks novel features vs. familiar paths
+- `λ_novelty` — how strongly the pilot seeks novel features vs. familiar paths
 
 Once `λ` is learned, the rover can **generalise** to new environments: it generates
 the MaxCal distribution with the learned multipliers applied to the new terrain's
-feature matrix, producing rider-consistent paths in places the rider has never been.
+feature matrix, producing human-pilot-consistent paths in places the pilot has never been.
 
-**Kernel fixed point as the rider's "home range"**
-The rider's kernel fixed point is the region of the environment where their path
+**Kernel fixed point as the pilot's "home range"**
+The pilot's kernel fixed point is the region of the environment where their path
 distribution has stabilised — their preferred patrol. Deviations from the fixed point
-(the rider exploring somewhere new) register as transient phases that update `λ`.
+(the pilot exploring somewhere new) register as transient phases that update `λ`.
 
 ### Code
 ```python
-from kernelcal.navigation.rider import RiderDemonstrationLearner
+from kernelcal.navigation.pilot import HumanPilotDemonstrationLearner
 
-learner = RiderDemonstrationLearner(
+learner = HumanPilotDemonstrationLearner(
     feature_fns=[energy_feature, novelty_feature, obstacle_proximity_feature],
 )
 
-# Feed recorded rider paths (list of waypoint sequences)
+# Feed recorded human-pilot paths (list of waypoint sequences)
 for recorded_path in rosbag_paths:
     learner.add_demonstration(recorded_path)
 
@@ -167,7 +167,7 @@ learner.fit()   # inverse MaxCal: recover Lagrange multipliers
 
 # Transfer to new environment
 new_planner = learner.make_planner(candidate_waypoints=new_grid)
-next_wp = new_planner.next_waypoint()   # rider-consistent path in novel terrain
+next_wp = new_planner.next_waypoint()   # human-pilot-consistent path in novel terrain
 ```
 
 ---
@@ -265,7 +265,7 @@ wp_publisher = InformativeWaypointPublisher(node, planner=planner)
               │       ▼                            │    │
               │  /kernelcal/next_waypoint  ─► PX4 ─┘    │
               │                                         │
-  Rider rosbag┤─► RiderDemonstrationLearner             │
+  Pilot rosbag┤─► HumanPilotDemonstrationLearner         │
               │        ▼                                │
               │   Learned λ (generalised to new terrain)│
               │                                         │
@@ -284,7 +284,7 @@ wp_publisher = InformativeWaypointPublisher(node, planner=planner)
 | 2 | `SemanticSLAMKernelTracker` — HS distance from ORB-SLAM3 descriptors | Medium | Continuous loop-closure confidence, novelty map |
 | 3 | `InformativePathPlanner` — MaxCalSampler with energy + novelty constraints | Medium | Replaces static waypoint missions |
 | 4 | Telemetry extension — add kernelcal metrics to `deepgis_telemetry_publisher.py` | Low | DeepGIS visibility of kernel dynamics |
-| 5 | `RiderDemonstrationLearner` — inverse MaxCal from rosbag | High | Rider-consistent generalisation to new terrain |
+| 5 | `HumanPilotDemonstrationLearner` — inverse MaxCal from rosbag | High | Human-pilot-consistent generalisation to new terrain |
 | 6 | Obstacle kernel exclusion — HS spike detection for dynamic obstacles | Medium | Reactive avoidance without explicit tracking |
 
 ---

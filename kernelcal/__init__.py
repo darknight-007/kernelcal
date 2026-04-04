@@ -85,7 +85,7 @@ from .prompts import PromptKernelIterator, prompt_kernel_distance
 from .navigation import (
     SemanticSLAMKernelTracker,
     InformativePathPlanner,
-    RiderDemonstrationLearner,
+    HumanPilotDemonstrationLearner,
 )
 
 __version__ = "0.1.0"
@@ -128,5 +128,5 @@ __all__ = [
     # navigation
     "SemanticSLAMKernelTracker",
     "InformativePathPlanner",
-    "RiderDemonstrationLearner",
+    "HumanPilotDemonstrationLearner",
 ]
