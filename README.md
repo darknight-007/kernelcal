@@ -32,6 +32,7 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.models` | MaxCal multi-model selector (SAM / YOLOv8 / Grounding DINO / ...) |
 | `kernelcal.prompts` | Self-consistent Grounding DINO prompt iteration |
 | `kernelcal.spectral` | Spectral kernel dynamics on finite graphs: fixed points, geodesics, stability, phase-transition diagnostics |
+| `kernelcal.attention` | MaxCal diagnostics on transformer attention kernels: GPT-2 probing, toy training, Landauer bound experiment |
 
 ---
 
@@ -143,6 +144,41 @@ rewards = assembly_reward_signal(scores, coverage_counts=visit_counts)
 sampler.update(feedback=rewards)
 ```
 
+### MaxCal diagnostics on transformer attention (GPU-accelerated)
+
+```python
+from kernelcal.attention import run_attention_experiment
+
+# Synthetic demo — no GPU or pretrained model required (~0.2s)
+result = run_attention_experiment(model_name="synthetic", seq_len=32)
+print(result.summary())
+
+# GPT-2 small on GPU — float16, ~1.5 GB VRAM (~20s)
+result = run_attention_experiment(model_name="gpt2", seq_len=64)
+```
+
+Run the 30-run ensemble (3 primes × 10 seeds) for statistical validation:
+
+```bash
+python -m kernelcal.attention.training \
+    --primes 23 53 97 --seeds 10 --steps 2000 \
+    --output-dir figures/attention
+```
+
+Run the Landauer bound experiment on a 2×GPU server:
+
+```bash
+# One-command Docker launcher (splits widths across 2 GPUs)
+bash run_landauer_server.sh
+
+# Or directly:
+python -m kernelcal.attention.landauer \
+    --widths 128 256 512 1024 \
+    --lrs 1e-2 1e-3 1e-4 1e-5 \
+    --steps 2000 --n-seeds 3 \
+    --output-dir /results/landauer
+```
+
 ### Spectral kernel dynamics on a graph
 
 ```python
@@ -213,6 +249,13 @@ kernelcal/
 │   └── selector.py       # ModelKernelSelector: MaxCal over SAM/YOLOv8/DINO/...
 ├── prompts/
 │   └── grounding.py      # PromptKernelIterator: fixed-point prompt search
+├── attention/
+│   ├── device.py          # GPU auto-selection (CUDA/MPS/CPU), float16 on GPU
+│   ├── kernel.py          # AttentionKernel: spectral MaxCal on attention matrices
+│   ├── tracker.py         # AttentionKernelTracker: forward-hook training logger
+│   ├── experiment.py      # Frozen GPT-2 probing, synthetic mode, null-model check
+│   ├── training.py        # Toy training loop + 30-run ensemble with MaxCal diagnostics
+│   └── landauer.py        # pynvml power logging + CKA ΔI + Landauer bound sweep
 └── spectral/
     ├── graph.py           # SpectralGraph: Laplacian eigendecomposition, factory methods
     ├── source.py          # GaussianMISource, CoupledGaussianMISource
@@ -222,6 +265,25 @@ kernelcal/
     ├── procedural_examples.py  # Standard examples runner + CLI
     ├── channel_image.py   # (dormant) Image-to-graph extraction pipeline
     └── pipeline.py        # (dormant) Image-to-spectral diagnostics pipeline
+```
+
+### Server deployment (Landauer experiment)
+
+For the Landauer bound experiment on a 2×GPU server:
+
+```
+Dockerfile.landauer          # CUDA 12.1 + PyTorch 2.2 container
+docker-compose.landauer.yml  # 2-GPU parallel sweep (widths split per GPU)
+run_landauer_server.sh       # One-command: build → run → merge → figure
+requirements.landauer.txt    # pynvml, transformers, matplotlib
+```
+
+```bash
+# Build once, run across 2 GPUs in parallel
+bash run_landauer_server.sh
+
+# Results → /results/landauer/landauer_results_merged.json
+#           /results/landauer/fig_landauer_results.pdf
 ```
 
 ---
@@ -238,6 +300,10 @@ kernelcal/
 | NTK–Hellinger conjecture (Conj. 3) | `kernelcal.ntk.hellinger` |
 | Assembly theory interface (§6) | `kernelcal.assembly.complexity` |
 | Adaptive sample-return planning (§5) | `kernelcal.maxcal.sampler` |
+| Attention as kernel (Prop. 1--2) | `kernelcal.attention.kernel` |
+| Endogenous landscape (Obs.~1) | `kernelcal.attention.kernel` |
+| Fixed-point structural probe (GPT-2) | `kernelcal.attention.experiment` |
+| Landauer bound experiment (H3) | `kernelcal.attention.landauer` |
 | Spectral geometric functional $\mathcal{R}_l$ (Prop. 1†) | `kernelcal.spectral.dynamics` |
 | Self-consistent kernels via exponential tilting (Cor. 1†) | `kernelcal.spectral.dynamics` |
 | Log-linear Fisher–Rao geodesics (Cor. 2†) | `kernelcal.spectral.dynamics` |
