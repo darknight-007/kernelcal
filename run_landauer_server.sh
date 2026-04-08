@@ -11,7 +11,7 @@
 set -euo pipefail
 
 STEPS=${STEPS:-2000}
-RESULTS_DIR=${RESULTS_DIR:-/results/landauer}
+RESULTS_DIR=${RESULTS_DIR:-$HOME/landauer_results}
 N_SEEDS=${N_SEEDS:-3}
 PRIME=${PRIME:-53}
 

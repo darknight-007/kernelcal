@@ -20,7 +20,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=0
     volumes:
-      - /results/landauer:/results/landauer
+      - ${HOME}/landauer_results:/results
     command:
       - --widths
       - "128"
@@ -39,7 +39,7 @@ services:
       - --device-id
       - "0"
       - --output-dir
-      - /results/landauer/gpu0
+      - /results/gpu0
     restart: "no"
 
   landauer-gpu1:
@@ -51,7 +51,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=1
     volumes:
-      - /results/landauer:/results/landauer
+      - ${HOME}/landauer_results:/results
     command:
       - --widths
       - "512"
@@ -68,7 +68,7 @@ services:
       - --prime
       - "53"
       - --device-id
-      - "0"          # each container sees its own GPU as device 0
+      - "0"
       - --output-dir
-      - /results/landauer/gpu1
+      - /results/gpu1
     restart: "no"

@@ -22,8 +22,8 @@ WORKDIR /kernelcal
 COPY . .
 RUN pip install --no-cache-dir -e ".[transformers]"
 
-# Results mount point
-RUN mkdir -p /results/landauer
+# Results mount point (user must -v mount a writable path)
+RUN mkdir -p /results
 
 # Default command: full server sweep
 # Override with --widths, --lrs, --steps etc.
