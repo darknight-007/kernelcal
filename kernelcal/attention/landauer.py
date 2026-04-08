@@ -92,24 +92,54 @@ class GPUPowerMonitor:
             pass
         return 0.0
 
+    def _read_hw_energy_mj(self) -> Optional[float]:
+        """Read hardware-integrated energy counter (millijoules) if available."""
+        if self._backend == 'nvml' and self._nvml is not None:
+            try:
+                # Returns millijoules since driver load — take delta
+                return float(self._nvml.nvmlDeviceGetTotalEnergyConsumption(self._handle))
+            except Exception:
+                return None
+        return None
+
     def start(self) -> None:
         self._readings.clear()
         self._running = True
+        self._energy_start_mj = self._read_hw_energy_mj()
         self._thread = threading.Thread(target=self._poll, daemon=True)
         self._thread.start()
 
     def stop(self) -> float:
-        """Stop monitoring and return total energy in watt-hours."""
+        """Stop monitoring and return total GPU energy in watt-hours.
+
+        Prefers hardware-integrated counter (nvmlDeviceGetTotalEnergyConsumption)
+        over polling-based integration when available.  The hardware counter
+        captures full-chip energy; polling may under-sample transient peaks.
+        """
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
+
+        # Try hardware counter first
+        energy_end_mj = self._read_hw_energy_mj()
+        if (self._energy_start_mj is not None and energy_end_mj is not None
+                and energy_end_mj >= self._energy_start_mj):
+            delta_mj = energy_end_mj - self._energy_start_mj
+            self._used_hw_counter = True
+            return delta_mj / 3_600_000.0  # mJ → Wh
+
+        # Fall back to trapezoidal integration of poll readings
+        self._used_hw_counter = False
         if not self._readings:
             return 0.0
-        # Trapezoidal integration in watt-seconds → watt-hours
         t = np.array([r[0] for r in self._readings])
         w = np.array([r[1] for r in self._readings])
         ws = float(np.trapz(w, t))
-        return ws / 3600.0  # watt-hours
+        return ws / 3600.0  # Wh
+
+    @property
+    def used_hw_counter(self) -> bool:
+        return getattr(self, '_used_hw_counter', False)
 
     @property
     def backend(self) -> str:
@@ -321,11 +351,15 @@ def run_single_landauer(
               f"W={watt_hours:.4f} Wh  ΔI={delta_I:.4f}  "
               f"ratio={watt_hours/(delta_I+1e-9):.4f}  {elapsed:.1f}s  [{monitor.backend}]")
 
+    backend_str = monitor.backend
+    if monitor.used_hw_counter:
+        backend_str += '+hw_counter'
+
     return LandauerRunResult(
         d_model=d_model, lr=lr, seed=seed, n_steps=n_steps,
         watt_hours=watt_hours, delta_I=delta_I,
         kernel_velocity_mean=float(np.mean(velocities)) if velocities else 0.0,
-        train_acc=acc, backend=monitor.backend,
+        train_acc=acc, backend=backend_str,
         step_velocities=velocities,
     )
 
@@ -387,6 +421,96 @@ def run_landauer_experiment(
     _generate_landauer_figures(all_results, out)
 
     return summary
+
+
+def _generate_landauer_figures_wall(results: list, out: Path) -> None:
+    """Extended figure with wall-power panel when wall_kwh data is present."""
+    has_wall = any('wall_kwh_per_run_estimate' in r for r in results)
+    if not has_wall:
+        return _generate_landauer_figures(results, out)
+
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+
+        BG, SURF, GOLD, SILVER = '#0d1117', '#161b22', '#e2b44d', '#b0bec5'
+        lrs    = sorted(set(r['lr'] for r in results))
+        widths = sorted(set(r['d_model'] for r in results))
+        cmap   = cm.get_cmap('plasma', len(widths))
+
+        fig, axes = plt.subplots(1, 4, figsize=(18, 5.5), dpi=150)
+        fig.patch.set_facecolor(BG)
+        fig.suptitle(
+            'Landauer Bound — GPU energy vs Wall-plug energy comparison',
+            color=GOLD, fontsize=11, y=1.01, fontweight='bold',
+        )
+
+        for ax in axes:
+            ax.set_facecolor(SURF); ax.tick_params(colors='#78909c')
+            for sp in ax.spines.values(): sp.set_color('#263238')
+
+        # Panel 1: W_gpu vs ΔI
+        for wi, d in enumerate(widths):
+            dr = [r for r in results if r['d_model'] == d]
+            axes[0].scatter([r['delta_I'] for r in dr],
+                            [r['watt_hours'] for r in dr],
+                            c=[cmap(wi)]*len(dr), s=20, alpha=0.7, label=f'd={d}')
+        axes[0].set_xlabel('ΔI (1-CKA)', color=SILVER, fontsize=9)
+        axes[0].set_ylabel('W_gpu (Wh)', color=SILVER, fontsize=9)
+        axes[0].set_title('GPU energy vs ΔI', color='#e0e0e0', fontsize=9)
+        axes[0].legend(fontsize=7, labelcolor=SILVER, facecolor='#1a1a2e', edgecolor='#37474f')
+
+        # Panel 2: W_gpu/ΔI vs lr
+        for wi, d in enumerate(widths):
+            vals = [np.mean([r['ratio_gpu_per_I'] for r in results
+                             if r['d_model']==d and abs(r['lr']-lr)<1e-10])
+                    if any(r['d_model']==d and abs(r['lr']-lr)<1e-10 for r in results)
+                    else np.nan for lr in lrs]
+            axes[1].plot([str(lr) for lr in lrs], vals, color=cmap(wi),
+                         marker='o', ms=5, lw=1.5, label=f'd={d}')
+        axes[1].set_xlabel('Learning rate', color=SILVER, fontsize=9)
+        axes[1].set_ylabel('W_gpu / ΔI', color=SILVER, fontsize=9)
+        axes[1].set_title('GPU energy ratio (should decrease as lr→0)', color='#e0e0e0', fontsize=9)
+        axes[1].legend(fontsize=7, labelcolor=SILVER, facecolor='#1a1a2e', edgecolor='#37474f')
+
+        # Panel 3: W_wall/ΔI vs lr
+        for wi, d in enumerate(widths):
+            vals = [np.mean([r['ratio_wall_per_I'] for r in results
+                             if r['d_model']==d and abs(r['lr']-lr)<1e-10
+                             and 'ratio_wall_per_I' in r])
+                    if any(r['d_model']==d and abs(r['lr']-lr)<1e-10
+                           and 'ratio_wall_per_I' in r for r in results)
+                    else np.nan for lr in lrs]
+            axes[2].plot([str(lr) for lr in lrs], vals, color=cmap(wi),
+                         marker='s', ms=5, lw=1.5, label=f'd={d}')
+        axes[2].set_xlabel('Learning rate', color=SILVER, fontsize=9)
+        axes[2].set_ylabel('W_wall / ΔI', color=SILVER, fontsize=9)
+        axes[2].set_title('Wall-plug energy ratio (true thermodynamic cost)', color='#e0e0e0', fontsize=9)
+        axes[2].legend(fontsize=7, labelcolor=SILVER, facecolor='#1a1a2e', edgecolor='#37474f')
+
+        # Panel 4: Wall/GPU overhead distribution
+        overheads = [r['wall_gpu_overhead'] for r in results
+                     if r.get('wall_gpu_overhead') is not None]
+        if overheads:
+            axes[3].hist(overheads, bins=15, color='#4fc3f7', alpha=0.8, edgecolor='white', lw=0.5)
+            axes[3].axvline(np.mean(overheads), color=GOLD, lw=2, ls='--',
+                            label=f'mean={np.mean(overheads):.2f}x')
+            axes[3].set_xlabel('Wall/GPU overhead factor', color=SILVER, fontsize=9)
+            axes[3].set_ylabel('Count', color=SILVER, fontsize=9)
+            axes[3].set_title('System overhead (>1 = CPU/cooling not in GPU reading)',
+                              color='#e0e0e0', fontsize=9)
+            axes[3].legend(fontsize=8, labelcolor=SILVER, facecolor='#1a1a2e', edgecolor='#37474f')
+
+        plt.tight_layout()
+        plt.savefig(out / 'fig_landauer_wall.pdf', bbox_inches='tight', facecolor=BG)
+        plt.savefig(out / 'fig_landauer_wall.png', bbox_inches='tight', facecolor=BG)
+        plt.close()
+        print(f'[landauer] wall-power figure saved → {out}/fig_landauer_wall.pdf')
+
+    except Exception as e:
+        print(f'[landauer] wall figure failed: {e}')
 
 
 def _generate_landauer_figures(results: list, out: Path) -> None:

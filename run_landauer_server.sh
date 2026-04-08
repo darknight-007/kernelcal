@@ -36,6 +36,18 @@ docker build -f Dockerfile.landauer -t kernelcal-landauer . \
 
 # Launch both GPUs in parallel
 echo "[2/4] Launching containers (GPU 0: d=128,256 | GPU 1: d=512,1024)..."
+echo ""
+echo ">>> MANUAL STEP: Record wall-plug kWh reading NOW (before experiment)"
+echo "    Smart plug / PDU / IPMI reading: _____ kWh"
+echo "    Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+echo "    (Record this value; you will be prompted again at the end)"
+echo ""
+WALL_KWH_BEFORE=""
+if [ -t 0 ]; then   # only prompt if interactive terminal
+    read -rp "Enter wall-plug kWh before [skip with Enter]: " WALL_KWH_BEFORE
+fi
+echo "$WALL_KWH_BEFORE" > "$RESULTS_DIR/wall_kwh_before.txt"
+echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$RESULTS_DIR/wall_kwh_before.txt"
 
 docker run --rm --gpus '"device=0"' \
     -v "$RESULTS_DIR":/results/landauer \
@@ -60,6 +72,26 @@ echo "  GPU1 container PID: $PID1"
 
 wait $PID0 && echo "[GPU0 done]"
 wait $PID1 && echo "[GPU1 done]"
+
+echo ""
+echo ">>> MANUAL STEP: Record wall-plug kWh reading NOW (after experiment)"
+echo "    Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+WALL_KWH_AFTER=""
+if [ -t 0 ]; then
+    read -rp "Enter wall-plug kWh after [skip with Enter]: " WALL_KWH_AFTER
+fi
+echo "$WALL_KWH_AFTER" > "$RESULTS_DIR/wall_kwh_after.txt"
+echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$RESULTS_DIR/wall_kwh_after.txt"
+
+# Compute wall delta if both values present
+if [ -n "$WALL_KWH_BEFORE" ] && [ -n "$WALL_KWH_AFTER" ]; then
+    python3 -c "
+before=$WALL_KWH_BEFORE; after=$WALL_KWH_AFTER
+delta=after-before
+print(f'Wall-plug delta: {delta:.4f} kWh  ({delta*3600:.1f} kJ)')
+print(f'GPU-only share: see landauer_results_merged.json for W_gpu totals')
+" | tee "$RESULTS_DIR/wall_delta.txt"
+fi
 
 # Merge results
 echo "[3/4] Merging results..."
