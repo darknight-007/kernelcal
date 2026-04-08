@@ -1,7 +1,6 @@
 numpy>=1.24
 scipy>=1.11
 matplotlib>=3.7
-transformers>=4.35
-accelerate>=0.24
-pynvml>=11.5        # GPU power monitoring
+transformers>=4.35,<4.46    # >=4.46 requires PyTorch>=2.4; base image has 2.2
+nvidia-ml-py>=12.0          # GPU power monitoring (replaces deprecated pynvml)
 pillow>=10.0

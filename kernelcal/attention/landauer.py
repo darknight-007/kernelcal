@@ -56,14 +56,16 @@ class GPUPowerMonitor:
         self._backend = self._init_backend()
 
     def _init_backend(self):
+        # nvidia-ml-py installs as 'pynvml' module; both old pynvml and
+        # new nvidia-ml-py expose the same API under that module name.
         try:
-            import pynvml
-            pynvml.nvmlInit()
-            self._handle = pynvml.nvmlDeviceGetHandleByIndex(self._device_id)
-            return 'pynvml'
-        except ImportError:
-            return 'cpu_estimate'
+            import pynvml as nvml  # works for both pynvml and nvidia-ml-py
+            nvml.nvmlInit()
+            self._handle = nvml.nvmlDeviceGetHandleByIndex(self._device_id)
+            self._nvml = nvml
+            return 'nvml'
         except Exception:
+            self._nvml = None
             return 'cpu_estimate'
 
     def _poll(self):
@@ -73,10 +75,9 @@ class GPUPowerMonitor:
             time.sleep(self._poll_interval)
 
     def _read_watts(self) -> float:
-        if self._backend == 'pynvml':
+        if self._backend == 'nvml' and self._nvml is not None:
             try:
-                import pynvml
-                mw = pynvml.nvmlDeviceGetPowerUsage(self._handle)
+                mw = self._nvml.nvmlDeviceGetPowerUsage(self._handle)
                 return mw / 1000.0
             except Exception:
                 return 0.0
@@ -112,7 +113,7 @@ class GPUPowerMonitor:
 
     @property
     def backend(self) -> str:
-        return self._backend
+        return self._backend  # 'nvml' or 'cpu_estimate'
 
 
 # ── CKA for mutual information proxy ─────────────────────────────────────
