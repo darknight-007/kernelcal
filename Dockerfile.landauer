@@ -13,14 +13,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential git curl \
         && rm -rf /var/lib/apt/lists/*
 
+# Upgrade pip + setuptools first (base image has old setuptools)
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
 # Python deps
 COPY requirements.landauer.txt /tmp/req.txt
 RUN pip install --no-cache-dir -r /tmp/req.txt
 
-# Install kernelcal
+# Install kernelcal (non-editable to avoid build-backend issues)
 WORKDIR /kernelcal
 COPY . .
-RUN pip install --no-cache-dir -e ".[transformers]"
+RUN pip install --no-cache-dir ".[transformers]"
 
 # Results mount point (user must -v mount a writable path)
 RUN mkdir -p /results
