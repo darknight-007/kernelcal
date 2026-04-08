@@ -169,14 +169,33 @@ Run the Landauer bound experiment on a 2×GPU server:
 
 ```bash
 # One-command Docker launcher (splits widths across 2 GPUs)
-bash run_landauer_server.sh
+# Record your smart-plug / PDU kWh reading BEFORE running:
+bash run_landauer_server.sh      # prompts for wall-plug before/after readings
 
-# Or directly:
+# Or directly (no Docker):
 python -m kernelcal.attention.landauer \
     --widths 128 256 512 1024 \
     --lrs 1e-2 1e-3 1e-4 1e-5 \
     --steps 2000 --n-seeds 3 \
-    --output-dir /results/landauer
+    --output-dir ~/landauer_results
+```
+
+Add wall-plug kWh delta retroactively (if you recorded it manually):
+
+```bash
+python3 add_wall_power.py \
+    --results ~/landauer_results \
+    --wall-kwh 0.004 \
+    --n-gpus 2
+# Adds wall_kwh and ratio_wall_per_I columns, regenerates figures
+# including GPU vs wall-plug overhead comparison
+```
+
+Merge results after a completed parallel run:
+
+```bash
+bash merge_landauer_results.sh ~/landauer_results
+# Merges gpu0/ + gpu1/ JSONs and regenerates all figures
 ```
 
 ### Spectral kernel dynamics on a graph
@@ -275,16 +294,22 @@ For the Landauer bound experiment on a 2×GPU server:
 Dockerfile.landauer          # CUDA 12.1 + PyTorch 2.2 container
 docker-compose.landauer.yml  # 2-GPU parallel sweep (widths split per GPU)
 run_landauer_server.sh       # One-command: build → run → merge → figure
-requirements.landauer.txt    # pynvml, transformers, matplotlib
+merge_landauer_results.sh    # Merge + plot after a completed run
+add_wall_power.py            # Inject wall-plug kWh into existing results
+requirements.landauer.txt    # nvidia-ml-py, transformers, matplotlib
 ```
 
 ```bash
 # Build once, run across 2 GPUs in parallel
+# (prompts for smart-plug / PDU kWh readings before and after)
 bash run_landauer_server.sh
 
-# Results → /results/landauer/landauer_results_merged.json
-#           /results/landauer/fig_landauer_results.pdf
+# Results → ~/landauer_results/landauer_results_merged.json
+#           ~/landauer_results/fig_landauer_results.pdf
+#           ~/landauer_results/fig_landauer_wall.pdf   (with wall-plug data)
 ```
+
+**Wall-plug measurement:** For the true thermodynamic bound, record the kWh delta on a smart plug / PDU attached to the server before and after the experiment. The `add_wall_power.py` script injects this into the results and computes the GPU/wall overhead factor.
 
 ---
 
