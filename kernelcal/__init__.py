@@ -36,6 +36,12 @@ models
 prompts
     Self-consistent prompt iteration for Grounding DINO.
 
+spectral
+    Spectral kernel dynamics on finite graphs: SpectralGraph, GaussianMISource,
+    SpectralKernelDynamics, and a six-experiment verification suite that makes
+    every Section 3 claim of the companion paper numerically visible.
+    (Paper §3: Propositions 1–3, Corollaries 1–3, Remarks 4, 8, Q6)
+
 Quick-start
 -----------
 >>> from kernelcal.maxcal import MaxCalSampler
@@ -87,6 +93,19 @@ from .navigation import (
     InformativePathPlanner,
     HumanPilotDemonstrationLearner,
 )
+from .spectral import (
+    SpectralGraph,
+    GaussianMISource,
+    CoupledGaussianMISource,
+    ProceduralSpectralDiagnostics,
+    procedural_graph_spectral_diagnostics,
+    SpectralKernelDynamics,
+    FixedPointResult,
+    StabilityResult,
+    spectral_entropy,
+    hessian_gap,
+    coupling_entropy,
+)
 
 __version__ = "0.1.0"
 
@@ -129,4 +148,42 @@ __all__ = [
     "SemanticSLAMKernelTracker",
     "InformativePathPlanner",
     "HumanPilotDemonstrationLearner",
+    # spectral
+    "SpectralGraph",
+    "GaussianMISource",
+    "CoupledGaussianMISource",
+    "ProceduralSpectralDiagnostics",
+    "procedural_graph_spectral_diagnostics",
+    "SpectralKernelDynamics",
+    "FixedPointResult",
+    "StabilityResult",
+    "spectral_entropy",
+    "hessian_gap",
+    "coupling_entropy",
+    "run_all_experiments",  # lazy via kernelcal.spectral.__getattr__
+    "run_procedural_examples",  # lazy via kernelcal.spectral.__getattr__
 ]
+
+
+def __getattr__(name: str):
+    if name == "run_all_experiments":
+        from .spectral.experiments import run_all_experiments
+        return run_all_experiments
+    if name == "run_procedural_examples":
+        from .spectral.procedural_examples import run_procedural_examples
+        return run_procedural_examples
+    # Backward-compatible access to dormant image pipeline symbols.
+    if name in {
+        "ChannelEdge",
+        "ChannelGraphExtraction",
+        "FlowTopologyAnalysis",
+        "ChannelVerificationArtifacts",
+        "ChannelImageSpectralDiagnostics",
+        "extract_channel_graph_from_image",
+        "analyze_channel_network_image",
+        "save_channel_extraction_verification",
+        "channel_image_to_spectral_diagnostics",
+    }:
+        from . import spectral as _sp
+        return getattr(_sp, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
