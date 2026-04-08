@@ -63,11 +63,11 @@ wait $PID1 && echo "[GPU1 done]"
 
 # Merge results
 echo "[3/4] Merging results..."
-python3 - <<'PY'
-import json
+python3 - "$RESULTS_DIR" <<'PY'
+import json, sys
 from pathlib import Path
 
-base = Path('/results/landauer')
+base = Path(sys.argv[1])
 all_results = []
 config = None
 
@@ -77,24 +77,33 @@ for part in ['gpu0', 'gpu1']:
         d = json.loads(f.read_text())
         all_results.extend(d['results'])
         config = d['config']
+        print(f'  Loaded {len(d["results"])} runs from {part}')
+    else:
+        print(f'  WARNING: {f} not found, skipping')
+
+if not all_results:
+    print('ERROR: no results found to merge')
+    sys.exit(1)
 
 merged = {'config': config or {}, 'results': all_results}
-(base / 'landauer_results_merged.json').write_text(json.dumps(merged, indent=2))
-print(f'Merged {len(all_results)} runs into landauer_results_merged.json')
+out = base / 'landauer_results_merged.json'
+out.write_text(json.dumps(merged, indent=2))
+print(f'Merged {len(all_results)} runs → {out}')
 PY
 
 # Generate combined figure
 echo "[4/4] Generating combined figure..."
-python3 - <<'PY'
+python3 - "$RESULTS_DIR" <<'PY'
 import json, sys
 sys.path.insert(0, '.')
 from kernelcal.attention.landauer import _generate_landauer_figures
 from pathlib import Path
 
-base = Path('/results/landauer')
-data = json.loads((base / 'landauer_results_merged.json').read_text())
+base = Path(sys.argv[1])
+merged_file = base / 'landauer_results_merged.json'
+data = json.loads(merged_file.read_text())
 _generate_landauer_figures(data['results'], base)
-print('Figure saved → /results/landauer/fig_landauer_results.pdf')
+print(f'Figure saved → {base}/fig_landauer_results.pdf')
 PY
 
 echo "========================================"
