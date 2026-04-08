@@ -1,0 +1,74 @@
+# ── Landauer bound experiment — 2×Titan RTX server ───────────────────────
+# Usage:  docker-compose -f docker-compose.landauer.yml up --build
+#
+# Runs two experiments in parallel, one per GPU.
+#   GPU 0: widths 128, 256  (lighter)
+#   GPU 1: widths 512, 1024 (heavier)
+# Results merged into /results/landauer/ on the host.
+# ─────────────────────────────────────────────────────────────────────────
+
+version: '3.8'
+
+services:
+
+  landauer-gpu0:
+    build:
+      context: .
+      dockerfile: Dockerfile.landauer
+    image: kernelcal-landauer
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+    volumes:
+      - /results/landauer:/results/landauer
+    command:
+      - --widths
+      - "128"
+      - "256"
+      - --lrs
+      - "1e-2"
+      - "1e-3"
+      - "1e-4"
+      - "1e-5"
+      - --steps
+      - "2000"
+      - --n-seeds
+      - "3"
+      - --prime
+      - "53"
+      - --device-id
+      - "0"
+      - --output-dir
+      - /results/landauer/gpu0
+    restart: "no"
+
+  landauer-gpu1:
+    build:
+      context: .
+      dockerfile: Dockerfile.landauer
+    image: kernelcal-landauer
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=1
+    volumes:
+      - /results/landauer:/results/landauer
+    command:
+      - --widths
+      - "512"
+      - "1024"
+      - --lrs
+      - "1e-2"
+      - "1e-3"
+      - "1e-4"
+      - "1e-5"
+      - --steps
+      - "2000"
+      - --n-seeds
+      - "3"
+      - --prime
+      - "53"
+      - --device-id
+      - "0"          # each container sees its own GPU as device 0
+      - --output-dir
+      - /results/landauer/gpu1
+    restart: "no"

@@ -93,6 +93,13 @@ from .navigation import (
     InformativePathPlanner,
     HumanPilotDemonstrationLearner,
 )
+from .attention import (
+    AttentionKernel,
+    AttentionKernelResult,
+    AttentionKernelTracker,
+    run_attention_experiment,
+    AttentionExperimentResult,
+)
 from .spectral import (
     SpectralGraph,
     GaussianMISource,
@@ -148,6 +155,12 @@ __all__ = [
     "SemanticSLAMKernelTracker",
     "InformativePathPlanner",
     "HumanPilotDemonstrationLearner",
+    # attention
+    "AttentionKernel",
+    "AttentionKernelResult",
+    "AttentionKernelTracker",
+    "run_attention_experiment",
+    "AttentionExperimentResult",
     # spectral
     "SpectralGraph",
     "GaussianMISource",

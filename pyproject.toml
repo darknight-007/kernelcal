@@ -34,8 +34,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-torch = ["torch>=2.0"]
-dev   = ["pytest>=7.0", "torch>=2.0"]
+torch        = ["torch>=2.0"]
+transformers = ["torch>=2.0", "transformers>=4.35", "accelerate>=0.24"]
+dev          = ["pytest>=7.0", "torch>=2.0", "transformers>=4.35", "matplotlib>=3.7", "pillow>=10.0"]
 
 [project.urls]
 Homepage   = "https://github.com/darknight-007/kernelcal"

@@ -1,0 +1,630 @@
+"""
+Toy training experiment: MaxCal diagnostics during transformer training.
+
+Tests whether SGD on a small transformer drives attention kernels toward
+MaxCal self-consistent fixed points.  Uses the modular-addition (grokking)
+task — a canonical phase-transition benchmark — so we can observe kernel
+dynamics through a known regime change.
+
+Key measurements at each logged step:
+  1. Field-equation residual  ||R[h*] - T[h*]||_inf  → tests fixed-point convergence
+  2. Spectral entropy         H[h_t]                  → tracks path entropy
+  3. Fiedler gap              Delta'(h_t)              → tracks stability margin
+  4. Kernel velocity          ||h_t - h_{t-1}||_2     → weak speed-limit test
+  5. Train / val accuracy                              → grokking phase reference
+
+Quick usage:
+    python -m kernelcal.attention.training \\
+        --prime 97 --steps 3000 --log-every 20 \\
+        --output-dir figures/attention_training
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+# ──────────────────────────────────────────────────────────────────────
+# Tiny transformer (pure PyTorch — no HuggingFace)
+# ──────────────────────────────────────────────────────────────────────
+
+def _build_model(prime: int, d_model: int, n_heads: int, n_layers: int,
+                 device):
+    """Build a tiny GPT-style transformer for modular addition."""
+    import torch
+    import torch.nn as nn
+
+    vocab = prime + 3   # 0..p-1, plus tokens for '=', '+', EOS
+
+    class MultiHeadSelfAttn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+            self.proj = nn.Linear(d_model, d_model, bias=False)
+            self.n_heads = n_heads
+            self.d_head = d_model // n_heads
+            self._attn_weights: Optional[torch.Tensor] = None
+
+        def forward(self, x):
+            B, T, C = x.shape
+            qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.d_head)
+            qkv = qkv.permute(2, 0, 3, 1, 4)
+            q, k, v = qkv[0], qkv[1], qkv[2]
+            scale = math.sqrt(self.d_head)
+            scores = (q @ k.transpose(-2, -1)) / scale
+            attn = scores.softmax(dim=-1)
+            self._attn_weights = attn.detach()
+            out = (attn @ v).transpose(1, 2).reshape(B, T, C)
+            return self.proj(out)
+
+    class TransformerBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = MultiHeadSelfAttn()
+            self.ln1  = nn.LayerNorm(d_model)
+            self.ff   = nn.Sequential(
+                nn.Linear(d_model, 4 * d_model),
+                nn.GELU(),
+                nn.Linear(4 * d_model, d_model),
+            )
+            self.ln2  = nn.LayerNorm(d_model)
+
+        def forward(self, x):
+            x = x + self.attn(self.ln1(x))
+            x = x + self.ff(self.ln2(x))
+            return x
+
+    class TinyGPT(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = nn.Embedding(vocab, d_model)
+            self.pos   = nn.Embedding(16, d_model)
+            self.blocks = nn.ModuleList([TransformerBlock() for _ in range(n_layers)])
+            self.ln_f  = nn.LayerNorm(d_model)
+            self.head  = nn.Linear(d_model, vocab, bias=False)
+
+        def forward(self, idx):
+            B, T = idx.shape
+            pos = torch.arange(T, device=idx.device)
+            x   = self.embed(idx) + self.pos(pos)
+            for blk in self.blocks:
+                x = blk(x)
+            return self.head(self.ln_f(x))
+
+        def attn_weights(self) -> List[torch.Tensor]:
+            """Return list of (n_heads, T, T) attention weight tensors per layer."""
+            return [blk.attn._attn_weights for blk in self.blocks]
+
+    return TinyGPT().to(device)
+
+
+def _make_dataset(prime: int, device):
+    """Modular addition dataset: all (a, b, a+b mod p) triples."""
+    import torch
+    EQ = prime; PLUS = prime + 1; EOS = prime + 2
+    pairs = [(a, b) for a in range(prime) for b in range(prime)]
+    np.random.shuffle(pairs)
+    split = int(0.8 * len(pairs))
+    train_pairs, val_pairs = pairs[:split], pairs[split:]
+
+    def to_tensors(ps):
+        seqs = torch.tensor(
+            [[a, PLUS, b, EQ, (a + b) % prime] for a, b in ps],
+            dtype=torch.long, device=device,
+        )
+        return seqs
+
+    return to_tensors(train_pairs), to_tensors(val_pairs)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Training loop with MaxCal kernel diagnostics
+# ──────────────────────────────────────────────────────────────────────
+
+@dataclass
+class TrainingRecord:
+    step: int
+    train_acc: float
+    val_acc: float
+    loss: float
+    # Per-layer/head lists
+    residuals: List[float]      # mean ||R - T||_inf across heads
+    h_entropies: List[float]    # mean H[h_t] across heads
+    fiedler_gaps: List[float]   # mean Δ' across heads
+    fiedler_values: List[float] # mean λ₁ across heads
+    kernel_velocity: List[float]# mean ||h_t - h_{t-1}||_2 across heads
+
+
+def run_training_experiment(
+    prime: int = 97,
+    d_model: int = 64,
+    n_heads: int = 4,
+    n_layers: int = 2,
+    n_steps: int = 3000,
+    batch_size: int = 128,
+    lr: float = 1e-3,
+    weight_decay: float = 1.0,
+    log_every: int = 25,
+    sigma2: float = 1.0,
+    mu2: float = 2.0,
+    device_str: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    verbose: bool = True,
+) -> List[TrainingRecord]:
+    """
+    Train a tiny transformer on modular addition and log MaxCal diagnostics.
+
+    Returns a list of TrainingRecord snapshots.
+    """
+    import torch
+    import torch.nn.functional as F
+    from .device import best_device
+
+    device = best_device(device_str)
+    if verbose:
+        from .device import device_info
+        print(f"[training] device={device_info(device)}  prime={prime}  "
+              f"d={d_model}  h={n_heads}  L={n_layers}  steps={n_steps}")
+
+    model   = _build_model(prime, d_model, n_heads, n_layers, device)
+    opt     = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    train_d, val_d = _make_dataset(prime, device)
+
+    # Previous kernel snapshots for velocity
+    prev_h: Dict[Tuple[int,int], np.ndarray] = {}
+    records: List[TrainingRecord] = []
+    t0 = time.time()
+
+    for step in range(n_steps + 1):
+        # ── forward / backward ────────────────────────────────────────
+        idx  = torch.randint(len(train_d), (min(batch_size, len(train_d)),))
+        seqs = train_d[idx]
+        x, y = seqs[:, :-1], seqs[:, 1:]
+        logits = model(x)
+        loss = F.cross_entropy(logits.view(-1, prime + 3), y.reshape(-1))
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step()
+
+        # ── logging ───────────────────────────────────────────────────
+        if step % log_every != 0:
+            continue
+
+        model.eval()
+        with torch.inference_mode():
+            # Train accuracy
+            logits_tr = model(train_d[:, :-1])
+            pred_tr   = logits_tr[:, -2, :prime].argmax(-1)
+            acc_tr    = (pred_tr == train_d[:, 4]).float().mean().item()
+            # Val accuracy
+            logits_v  = model(val_d[:, :-1])
+            pred_v    = logits_v[:, -2, :prime].argmax(-1)
+            acc_v     = (pred_v == val_d[:, 4]).float().mean().item()
+
+            attn_ws = model.attn_weights()
+
+        # ── MaxCal diagnostics for each layer/head ────────────────────
+        from .kernel import AttentionKernel
+        from ..spectral.dynamics import spectral_entropy, field_equation_residual
+        from ..spectral.source import GaussianMISource
+
+        residuals_step = []
+        entropies_step = []
+        delta_step     = []
+        lam1_step      = []
+        velocity_step  = []
+
+        for li, attn_w in enumerate(attn_ws):
+            if attn_w is None:
+                continue
+            attn_arr = attn_w[0].float().cpu().numpy()  # (n_heads, T, T)
+            for hi in range(attn_arr.shape[0]):
+                A = attn_arr[hi]
+                ak = AttentionKernel(A, layer=li, head=hi, step=step,
+                                     sigma2=sigma2, mu2=mu2,
+                                     eigenvalue_aware=True)
+                res = ak.analyse(fp_max_iter=100, fp_tol=1e-7)
+
+                # residual
+                from ..spectral.source import GaussianMISource as _GMS
+                from ..spectral.graph import SpectralGraph as _SG
+                from ..spectral.dynamics import field_equation_residual as _fer
+                L  = ak._AttentionKernel__class_laplacian(ak._K) if hasattr(ak, '_AttentionKernel__class_laplacian') else AttentionKernel._laplacian_from_kernel(ak._K)
+                g  = _SG(L)
+                src = _GMS(sigma2=sigma2, mu2=mu2, eigenvalues=g.eigenvalues)
+                from ..spectral.dynamics import SpectralKernelDynamics as _SKD
+                dyn = _SKD(g, src)
+                fp  = dyn.fixed_point_iteration(max_iter=100, tol=1e-7)
+                T_vals = src.T(fp.h_star)
+                resid  = float(np.max(np.abs(
+                    _fer(fp.h_star, dyn.h0, T_vals)
+                )))
+
+                # velocity
+                key = (li, hi)
+                vel = 0.0
+                if key in prev_h:
+                    vel = float(np.linalg.norm(fp.h_star - prev_h[key]))
+                prev_h[key] = fp.h_star.copy()
+
+                from ..spectral.dynamics import spectral_entropy as _se
+                residuals_step.append(resid)
+                entropies_step.append(float(_se(fp.h_star)))
+                from ..spectral.dynamics import StabilityResult
+                stab = dyn.stability_analysis(fp.h_star)
+                delta_step.append(float(stab.fiedler_gap))
+                lam1_step.append(float(g.fiedler_value))
+                velocity_step.append(vel)
+
+        rec = TrainingRecord(
+            step=step,
+            train_acc=acc_tr, val_acc=acc_v, loss=float(loss.item()),
+            residuals=[float(np.mean(residuals_step))],
+            h_entropies=[float(np.mean(entropies_step))],
+            fiedler_gaps=[float(np.mean(delta_step))],
+            fiedler_values=[float(np.mean(lam1_step))],
+            kernel_velocity=[float(np.mean(velocity_step)) if velocity_step else 0.0],
+        )
+        records.append(rec)
+
+        if verbose and step % (log_every * 10) == 0:
+            print(f"  step={step:4d}  loss={rec.loss:.3f}  "
+                  f"tr_acc={rec.train_acc:.3f}  val_acc={rec.val_acc:.3f}  "
+                  f"H={rec.h_entropies[0]:.3f}  "
+                  f"Δ'={rec.fiedler_gaps[0]:.3f}  "
+                  f"resid={rec.residuals[0]:.2e}  "
+                  f"vel={rec.kernel_velocity[0]:.4f}")
+
+        model.train()
+
+    elapsed = time.time() - t0
+    if verbose:
+        print(f"[training] done  {elapsed:.1f}s  {n_steps/elapsed:.0f} steps/s")
+
+    if output_dir:
+        _save_results(records, Path(output_dir), verbose)
+
+    return records
+
+
+def _save_results(records: List[TrainingRecord], out: Path, verbose: bool) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    # JSON
+    data = [
+        dict(step=r.step, train_acc=r.train_acc, val_acc=r.val_acc,
+             loss=r.loss, residual=r.residuals[0],
+             H=r.h_entropies[0], delta_prime=r.fiedler_gaps[0],
+             lambda1=r.fiedler_values[0], velocity=r.kernel_velocity[0])
+        for r in records
+    ]
+    (out / 'training_diagnostics.json').write_text(json.dumps(data, indent=2))
+
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        BG, SURF, GOLD = '#0d1117', '#161b22', '#e2b44d'
+        steps  = [r.step for r in records]
+        acc_tr = [r.train_acc for r in records]
+        acc_v  = [r.val_acc for r in records]
+        loss   = [r.loss for r in records]
+        H      = [r.h_entropies[0] for r in records]
+        delta  = [r.fiedler_gaps[0] for r in records]
+        resid  = [r.residuals[0] for r in records]
+        vel    = [r.kernel_velocity[0] for r in records]
+
+        fig, axes = plt.subplots(2, 3, figsize=(14, 8), dpi=150)
+        fig.patch.set_facecolor(BG)
+        fig.suptitle('MaxCal Diagnostics During Transformer Training (Modular Addition)',
+                     color=GOLD, fontsize=12, y=1.01)
+
+        panels = [
+            (axes[0,0], steps, [acc_tr, acc_v], ['#a5d6a7','#ffb74d'],
+             ['Train acc','Val acc'],  'Accuracy', 'Grokking transition'),
+            (axes[0,1], steps, [loss], ['#ef5350'], ['Loss'],
+             'Cross-entropy loss', 'Training loss'),
+            (axes[0,2], steps, [H], ['#4fc3f7'], ['H[h_t]'],
+             'Spectral entropy', 'MaxCal path entropy'),
+            (axes[1,0], steps, [delta], ['#a5d6a7'], ["Δ'(h_t)"],
+             "Fiedler gap Δ'", 'Stability margin'),
+            (axes[1,1], steps, [resid], ['#ce93d8'], ['||R-T||_∞'],
+             'Field-eq residual', 'Self-consistency: → 0 = converging to MaxCal fixed point'),
+            (axes[1,2], steps[1:], [vel[1:]], ['#ff8a65'], ['||Δh_t||'],
+             'Kernel velocity', 'Speed limit test: should decrease at convergence'),
+        ]
+
+        for ax, xs, ys, cs, labs, ylabel, title in panels:
+            ax.set_facecolor(SURF)
+            for y, c, lab in zip(ys, cs, labs):
+                ax.plot(xs[:len(y)], y, color=c, lw=1.6, label=lab)
+            ax.set_xlabel('Step', color='#b0bec5', fontsize=9)
+            ax.set_ylabel(ylabel, color='#b0bec5', fontsize=9)
+            ax.set_title(title, color='#e0e0e0', fontsize=9)
+            ax.tick_params(colors='#78909c')
+            for sp in ax.spines.values(): sp.set_color('#263238')
+            if len(labs) > 1:
+                ax.legend(fontsize=8, labelcolor='#b0bec5',
+                         facecolor='#1a1a2e', edgecolor='#37474f')
+
+        plt.tight_layout()
+        plt.savefig(out / 'fig5_training_dynamics.pdf',
+                    bbox_inches='tight', facecolor=BG)
+        plt.close()
+        if verbose:
+            print(f"[training] saved → {out}/fig5_training_dynamics.pdf")
+    except Exception as e:
+        if verbose:
+            print(f"[training] plot skipped: {e}")
+
+
+def run_ensemble_experiment(
+    primes: List[int] = (23, 53, 97),
+    seeds: int = 10,
+    d_model: int = 64,
+    n_heads: int = 4,
+    n_layers: int = 2,
+    n_steps: int = 2000,
+    batch_size: int = 128,
+    lr: float = 1e-3,
+    weight_decay: float = 1.0,
+    log_every: int = 50,
+    sigma2: float = 1.0,
+    mu2: float = 2.0,
+    device_str: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    verbose: bool = True,
+) -> dict:
+    """
+    Run multiple training experiments across different seeds and problem
+    structures (primes) and compute distributions of MaxCal kernel behavior.
+
+    Returns a dict with:
+      'raw'    : list of all TrainingRecord lists
+      'steps'  : common step indices
+      'mean'   : {metric: array(n_steps)} mean across all runs
+      'std'    : {metric: array(n_steps)} std across all runs
+      'final'  : {metric: array(n_runs)} values at last step (for distributions)
+      'meta'   : run metadata (prime, seed per run)
+    """
+    import torch
+
+    from .device import best_device, device_info
+    device = best_device(device_str)
+    if verbose:
+        n_total = len(primes) * seeds
+        print(f"[ensemble] {n_total} runs  primes={list(primes)}  seeds={seeds}"
+              f"  device={device_info(device)}")
+
+    all_records: List[List[TrainingRecord]] = []
+    all_meta: List[dict] = []
+
+    run_idx = 0
+    for prime in primes:
+        for seed in range(seeds):
+            import torch
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            if verbose:
+                print(f"  [{run_idx+1}/{len(primes)*seeds}] prime={prime} seed={seed}")
+            recs = run_training_experiment(
+                prime=prime, d_model=d_model, n_heads=n_heads,
+                n_layers=n_layers, n_steps=n_steps, batch_size=batch_size,
+                lr=lr, weight_decay=weight_decay, log_every=log_every,
+                sigma2=sigma2, mu2=mu2, device_str=device_str,
+                output_dir=None, verbose=False,
+            )
+            all_records.append(recs)
+            all_meta.append({'prime': prime, 'seed': seed})
+            run_idx += 1
+
+    # Align on common steps (all runs share same log_every)
+    steps = [r.step for r in all_records[0]]
+    metrics = ['residuals', 'h_entropies', 'fiedler_gaps', 'fiedler_values', 'kernel_velocity']
+    short   = ['residual', 'H', 'delta_prime', 'lambda1', 'velocity']
+
+    arrays = {m: np.array([[getattr(r, mk)[0] for r in recs]
+                            for recs in all_records])
+              for m, mk in zip(short, metrics)}
+    # shape: (n_runs, n_steps)
+
+    mean_d = {m: arrays[m].mean(axis=0) for m in short}
+    std_d  = {m: arrays[m].std(axis=0)  for m in short}
+    final  = {m: arrays[m][:, -1]       for m in short}
+
+    result = {
+        'raw': all_records, 'steps': steps,
+        'mean': mean_d, 'std': std_d, 'final': final, 'meta': all_meta,
+        'primes': list(primes), 'seeds': seeds,
+    }
+
+    if output_dir:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        _save_ensemble_results(result, out, verbose)
+
+    return result
+
+
+def _save_ensemble_results(result: dict, out: Path, verbose: bool) -> None:
+    """Save JSON summary and publication-quality ensemble figures."""
+    steps = result['steps']
+    mean  = result['mean']
+    std   = result['std']
+    final = result['final']
+    n_runs = len(result['raw'])
+
+    # JSON
+    summary = {
+        'n_runs': n_runs, 'primes': result['primes'], 'seeds': result['seeds'],
+        'final_distributions': {k: {'mean': float(v.mean()), 'std': float(v.std()),
+                                    'min': float(v.min()), 'max': float(v.max())}
+                                 for k, v in final.items()},
+    }
+    (out / 'ensemble_summary.json').write_text(json.dumps(summary, indent=2))
+
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.gridspec import GridSpec
+
+        BG, SURF, GOLD, SILVER = '#0d1117', '#161b22', '#e2b44d', '#b0bec5'
+
+        METRICS = [
+            ('residual',    '#ce93d8', 'Field-eq residual ||R-T||_inf',
+             'Self-consistency → 0 = MaxCal fixed point'),
+            ('H',           '#4fc3f7', 'Spectral entropy H[h_t]',
+             'Path entropy — measures breadth of attention'),
+            ('delta_prime', '#a5d6a7', "Fiedler gap Delta'(h_t)",
+             'Stability margin — should increase with training'),
+            ('velocity',    '#ff8a65', 'Kernel velocity ||Δh_t||',
+             'Speed limit — should decrease with training'),
+        ]
+
+        # ── Fig A: Trajectory with error bands ───────────────────────
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8), dpi=150)
+        fig.patch.set_facecolor(BG)
+        fig.suptitle(
+            f'MaxCal Kernel Dynamics — Ensemble ({n_runs} runs, '
+            f'primes={result["primes"]}, {result["seeds"]} seeds each)',
+            color=GOLD, fontsize=11, y=1.01,
+        )
+
+        for ax, (key, col, ylabel, title) in zip(axes.ravel(), METRICS):
+            ax.set_facecolor(SURF)
+            ax.tick_params(colors='#78909c')
+            for sp in ax.spines.values(): sp.set_color('#263238')
+            mu, sg = mean[key], std[key]
+            xs = steps[:len(mu)]
+            if key == 'velocity': xs = steps[1:len(mu)+1]
+            ax.fill_between(xs, mu - sg, mu + sg,
+                            alpha=0.3, color=col, label='mean ± 1 std')
+            ax.plot(xs, mu, color=col, lw=2, label='mean')
+            # Per-prime means
+            colors_p = ['#80cbc4', '#ffcc02', '#f48fb1']
+            for pi, (prime, c_p) in enumerate(zip(result['primes'], colors_p)):
+                runs_p = [i for i, m in enumerate(result['meta'])
+                          if m['prime'] == prime]
+                arr_p  = np.array([result['raw'][i]
+                                   for i in runs_p])
+                vals_p = np.array([[getattr(r, key + ('s' if key != 'H' and
+                                   key != 'velocity' and key != 'residual' and
+                                   key != 'delta_prime' and key != 'lambda1'
+                                   else '')
+                                   if False else
+                                   {'residual':'residuals','H':'h_entropies',
+                                    'delta_prime':'fiedler_gaps',
+                                    'lambda1':'fiedler_values',
+                                    'velocity':'kernel_velocity'}[key])[0]
+                                   for r in recs] for recs in arr_p])
+                ax.plot(xs[:vals_p.shape[1]], vals_p.mean(axis=0),
+                        color=c_p, lw=1, ls='--', alpha=0.7, label=f'p={prime}')
+            ax.set_xlabel('Step', color=SILVER, fontsize=9)
+            ax.set_ylabel(ylabel, color=SILVER, fontsize=9)
+            ax.set_title(title, color='#e0e0e0', fontsize=9)
+            ax.legend(fontsize=7, labelcolor=SILVER,
+                      facecolor='#1a1a2e', edgecolor='#37474f', ncol=2)
+
+        plt.tight_layout()
+        plt.savefig(out / 'fig6_ensemble_trajectories.pdf',
+                    bbox_inches='tight', facecolor=BG)
+        plt.close()
+
+        # ── Fig B: Final-step distributions (violin + box) ───────────
+        fig, axes = plt.subplots(1, 4, figsize=(14, 5), dpi=150)
+        fig.patch.set_facecolor(BG)
+        fig.suptitle('Distribution of MaxCal Diagnostics at Final Training Step',
+                     color=GOLD, fontsize=11, y=1.01)
+
+        for ax, (key, col, ylabel, _) in zip(axes, METRICS):
+            ax.set_facecolor(SURF)
+            ax.tick_params(colors='#78909c')
+            for sp in ax.spines.values(): sp.set_color('#263238')
+            vals = final[key]
+            # Violin
+            vp = ax.violinplot([vals], positions=[0], showmedians=True,
+                               showextrema=True)
+            for pc in vp['bodies']:
+                pc.set_facecolor(col)
+                pc.set_alpha(0.7)
+            vp['cmedians'].set_color('white')
+            vp['cmaxes'].set_color('#37474f')
+            vp['cmins'].set_color('#37474f')
+            vp['cbars'].set_color('#37474f')
+            # Per-prime points
+            for pi, (prime, c_p) in enumerate(zip(result['primes'], colors_p)):
+                runs_p = [i for i, m in enumerate(result['meta'])
+                          if m['prime'] == prime]
+                v_p = final[key][runs_p]
+                xs_jit = np.random.uniform(-0.15, 0.15, len(v_p))
+                ax.scatter(xs_jit, v_p, c=c_p, s=25, alpha=0.8,
+                           label=f'p={prime}', zorder=5)
+            ax.set_xticks([])
+            ax.set_ylabel(ylabel, color=SILVER, fontsize=9)
+            ax.set_title(f'μ={vals.mean():.3f}\nσ={vals.std():.3f}',
+                         color='#e0e0e0', fontsize=8)
+            ax.legend(fontsize=7, labelcolor=SILVER,
+                      facecolor='#1a1a2e', edgecolor='#37474f')
+
+        plt.tight_layout()
+        plt.savefig(out / 'fig7_final_distributions.pdf',
+                    bbox_inches='tight', facecolor=BG)
+        plt.close()
+
+        if verbose:
+            print(f"[ensemble] saved → {out}/fig6_ensemble_trajectories.pdf")
+            print(f"[ensemble] saved → {out}/fig7_final_distributions.pdf")
+
+    except Exception as e:
+        if verbose:
+            print(f"[ensemble] plots failed: {e}")
+        import traceback; traceback.print_exc()
+
+
+def _main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="MaxCal diagnostics during toy transformer training.")
+    parser.add_argument('--primes', type=int, nargs='+', default=[23, 53, 97])
+    parser.add_argument('--seeds', type=int, default=10)
+    parser.add_argument('--d-model', type=int, default=64)
+    parser.add_argument('--n-heads', type=int, default=4)
+    parser.add_argument('--n-layers', type=int, default=2)
+    parser.add_argument('--steps', type=int, default=2000)
+    parser.add_argument('--log-every', type=int, default=50)
+    parser.add_argument('--device', default=None)
+    parser.add_argument('--output-dir',
+        default='/home/jdas/Documents/manuscripts/attention-kernel-maxcal/figures')
+    parser.add_argument('--single', action='store_true',
+        help='Run a single seed (prime=97) for quick testing')
+    args = parser.parse_args()
+
+    if args.single:
+        run_training_experiment(
+            prime=97, d_model=args.d_model,
+            n_heads=args.n_heads, n_layers=args.n_layers,
+            n_steps=args.steps, log_every=args.log_every,
+            device_str=args.device, output_dir=args.output_dir,
+            verbose=True,
+        )
+    else:
+        run_ensemble_experiment(
+            primes=args.primes, seeds=args.seeds,
+            d_model=args.d_model, n_heads=args.n_heads,
+            n_layers=args.n_layers, n_steps=args.steps,
+            log_every=args.log_every,
+            device_str=args.device, output_dir=args.output_dir,
+            verbose=True,
+        )
+
+
+if __name__ == '__main__':
+    _main()
