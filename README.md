@@ -31,6 +31,7 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.thermodynamics` | Landauer bound $\delta W \geq k_B T \, \delta I_k$, GPU power logging |
 | `kernelcal.models` | MaxCal multi-model selector (SAM / YOLOv8 / Grounding DINO / ...) |
 | `kernelcal.prompts` | Self-consistent Grounding DINO prompt iteration |
+| `kernelcal.spectral` | Spectral kernel dynamics on finite graphs: fixed points, geodesics, stability, phase-transition diagnostics |
 
 ---
 
@@ -142,6 +143,36 @@ rewards = assembly_reward_signal(scores, coverage_counts=visit_counts)
 sampler.update(feedback=rewards)
 ```
 
+### Spectral kernel dynamics on a graph
+
+```python
+from kernelcal.spectral import SpectralGraph, GaussianMISource, SpectralKernelDynamics
+
+# Build a path graph and run MaxCal spectral dynamics
+g   = SpectralGraph.path_graph(8)
+src = GaussianMISource(sigma2=1.0, mu2=2.0, eigenvalues=g.eigenvalues)
+dyn = SpectralKernelDynamics(g, src)
+
+fp   = dyn.fixed_point_iteration()
+stab = dyn.stability_analysis(fp.h_star)
+
+print(f"Converged: {fp.converged}  iterations: {fp.iterations}")
+print(f"Stable: {stab.stable}  Fiedler gap: {stab.fiedler_gap:.4f}")
+print(f"Spectral entropy: {dyn.spectral_entropy(fp.h_star):.4f}")
+```
+
+Run the standard procedural examples (path, weak-path, cycle):
+
+```bash
+python -m kernelcal.spectral.procedural_examples --output-dir figures/spectral
+```
+
+Run the full 7-experiment verification suite:
+
+```bash
+python -m kernelcal.spectral.experiments --N 8 --mu2 2.0
+```
+
 ### Self-consistent Grounding DINO prompt
 
 ```python
@@ -180,8 +211,17 @@ kernelcal/
 │   └── bounds.py         # Landauer bound, PowerMonitor, ThermodynamicEfficiency
 ├── models/
 │   └── selector.py       # ModelKernelSelector: MaxCal over SAM/YOLOv8/DINO/...
-└── prompts/
-    └── grounding.py      # PromptKernelIterator: fixed-point prompt search
+├── prompts/
+│   └── grounding.py      # PromptKernelIterator: fixed-point prompt search
+└── spectral/
+    ├── graph.py           # SpectralGraph: Laplacian eigendecomposition, factory methods
+    ├── source.py          # GaussianMISource, CoupledGaussianMISource
+    ├── dynamics.py        # SpectralKernelDynamics: R_l, fixed points, geodesics, stability
+    ├── experiments.py     # 7-experiment verification suite (Exps 1–7)
+    ├── procedural.py      # Procedural graph diagnostics pipeline
+    ├── procedural_examples.py  # Standard examples runner + CLI
+    ├── channel_image.py   # (dormant) Image-to-graph extraction pipeline
+    └── pipeline.py        # (dormant) Image-to-spectral diagnostics pipeline
 ```
 
 ---
@@ -198,6 +238,13 @@ kernelcal/
 | NTK–Hellinger conjecture (Conj. 3) | `kernelcal.ntk.hellinger` |
 | Assembly theory interface (§6) | `kernelcal.assembly.complexity` |
 | Adaptive sample-return planning (§5) | `kernelcal.maxcal.sampler` |
+| Spectral geometric functional $\mathcal{R}_l$ (Prop. 1†) | `kernelcal.spectral.dynamics` |
+| Self-consistent kernels via exponential tilting (Cor. 1†) | `kernelcal.spectral.dynamics` |
+| Log-linear Fisher–Rao geodesics (Cor. 2†) | `kernelcal.spectral.dynamics` |
+| Hessian stability, Fiedler gap $\Delta'$ (Cor. 3†, Q6†) | `kernelcal.spectral.dynamics` |
+| Spectral entropy early-warning (Rem. 8†) | `kernelcal.spectral.dynamics` |
+
+*† from the companion spectral paper (in preparation)*
 
 ---
 
