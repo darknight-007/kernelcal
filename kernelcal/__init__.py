@@ -90,30 +90,28 @@ from .thermodynamics import (
     PowerMonitor,
     ThermodynamicEfficiency,
 )
-from .models import ModelKernelSelector, ModelRecord
-from .prompts import PromptKernelIterator, prompt_kernel_distance
-from .navigation import (
-    SemanticSLAMKernelTracker,
-    InformativePathPlanner,
-    HumanPilotDemonstrationLearner,
-)
+try:
+    from .models import ModelKernelSelector, ModelRecord
+except ImportError:
+    pass
+try:
+    from .prompts import PromptKernelIterator, prompt_kernel_distance
+except ImportError:
+    pass
+try:
+    from .navigation import (
+        SemanticSLAMKernelTracker,
+        InformativePathPlanner,
+        HumanPilotDemonstrationLearner,
+    )
+except ImportError:
+    pass
 from .attention import (
     AttentionKernel,
     AttentionKernelResult,
     AttentionKernelTracker,
     run_attention_experiment,
     AttentionExperimentResult,
-)
-from .fluid import (
-    FluidGraph,
-    PotentialLandscape,
-    FluidSimulationConfig,
-    FluidSimulationResult,
-    ring_distance,
-    gaussian_bump_on_ring,
-    make_twenty_node_reference_landscape,
-    simulate_kernel_fluid,
-    save_timeseries_csv,
 )
 from .spectral import (
     SpectralGraph,
