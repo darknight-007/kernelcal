@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
-> **Status:** research companion library, v0.2.0 — pre-publication, API subject to change.
+> **Status:** research companion library, v0.3.0 — pre-publication, API subject to change.
 
 Companion library to:
 
@@ -33,6 +33,8 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.prompts` | Self-consistent Grounding DINO prompt iteration |
 | `kernelcal.spectral` | Spectral kernel dynamics on finite graphs: fixed points, geodesics, stability, phase-transition diagnostics |
 | `kernelcal.attention` | MaxCal diagnostics on transformer attention kernels: GPT-2 probing, toy training, Landauer bound, perturbation-relaxation, grokking phase detection |
+| `kernelcal.fluid` | Fluid learning dynamics under MaxCal; kernel-trajectory experiments for flow-based systems |
+| `kernelcal.bandits` | **Decentralised Dynamic-Kernel GP-UCB (DDK-GPUCB):** spatiotemporal bandit simulation with learnable mixture kernels, gossip consensus, and Chebyshev-accelerated mixing |
 
 ---
 
@@ -165,6 +167,74 @@ python -m kernelcal.attention.training \
     --output-dir figures/attention
 ```
 
+### Decentralised Dynamic-Kernel GP-UCB (v0.3.0) — `kernelcal.bandits`
+
+Simulation suite for the manuscript
+*"Decentralised Gaussian Process Bandits with Dynamic Kernels under MaxCal"* (Das, 2026).
+
+Arms are `(x, t)` pairs (space × time).  The field has two structurally distinct regions
+requiring **different kernel classes** — not just different hyperparameters:
+
+| Region | True kernel | What SE alone cannot do |
+|--------|-------------|------------------------|
+| Left (`x < 0.5`) | SE(x) × Periodic(t) | Represent cosine temporal modulation at any lengthscale |
+| Right (`x ≥ 0.5`) | Anisotropic SE(x,t) | — (SE is correct here) |
+
+The **mixture kernel** `k = (1−w)·k_SE + w·k_SE×Per` learns the mixing weight `w` per agent.
+Agents in the periodic region converge to `w → 1`; agents in the smooth region to `w → 0`.
+
+```python
+from kernelcal.bandits import run_experiment, ExperimentConfig
+
+results = run_experiment(ExperimentConfig(T=300, N=4, seed=42))
+results.plot("figures/")
+```
+
+**Server run** (parallelised across seeds — recommended for T ≥ 500):
+
+```bash
+python3 kernelcal/bandits/run_server.py --T 1000 --seeds 20 --n_jobs 4 --out results/
+```
+
+**Validity tests** (all pass):
+- `LML(SE×Per, periodic data) = −9.4`  vs  `LML(SE, periodic data) = −111.7`  ✓
+- `w_per: 0.5 → 0.63` (increases toward 1 on periodic region)  ✓
+- `w_smo: 0.5 → 0.12` (decreases toward 0 on smooth region)  ✓
+
+---
+
+### Fluid learning dynamics — `kernelcal.fluid`
+
+```python
+from kernelcal.fluid import FluidKernelDynamics
+
+dyn = FluidKernelDynamics(viscosity=0.1, diffusion_coeff=0.5)
+trajectory = dyn.evolve(initial_kernel=K0, n_steps=200)
+print(trajectory.summary())
+```
+
+---
+
+### ROS2 bloom simulation — `ros2_ws/bloom_maxcal_sim`
+
+MaxCal-guided rover following a spatiotemporal algal bloom field.
+Works as a standalone Python demo (no ROS2 installation required):
+
+```bash
+python3 ros2_ws/src/bloom_maxcal_sim/demo_bloom_maxcal.py
+```
+
+Or with a full ROS2 Humble installation:
+
+```bash
+cd ros2_ws
+colcon build --packages-select bloom_maxcal_sim
+source install/setup.bash
+ros2 launch bloom_maxcal_sim bloom_sim.launch.py
+```
+
+---
+
 ### New experiments (v0.2.0)
 
 **Perturbation-relaxation** — test whether converged kernels are dynamical attractors:
@@ -291,15 +361,40 @@ kernelcal/
 │   ├── perturbation.py    # Perturbation-relaxation: perturb head, resume, measure return
 │   ├── grokking.py        # Extended grokking: 50K steps, per-head diagnostics, phase detection
 │   └── landauer.py        # CKA ΔI + auto energy monitoring + Landauer bound sweep
-└── spectral/
-    ├── graph.py           # SpectralGraph: Laplacian eigendecomposition, factory methods
-    ├── source.py          # GaussianMISource, CoupledGaussianMISource
-    ├── dynamics.py        # SpectralKernelDynamics: R_l, fixed points, geodesics, stability
-    ├── experiments.py     # 7-experiment verification suite (Exps 1–7)
-    ├── procedural.py      # Procedural graph diagnostics pipeline
-    ├── procedural_examples.py  # Standard examples runner + CLI
-    ├── channel_image.py   # (dormant) Image-to-graph extraction pipeline
-    └── pipeline.py        # (dormant) Image-to-spectral diagnostics pipeline
+├── spectral/
+│   ├── graph.py           # SpectralGraph: Laplacian eigendecomposition, factory methods
+│   ├── source.py          # GaussianMISource, CoupledGaussianMISource
+│   ├── dynamics.py        # SpectralKernelDynamics: R_l, fixed points, geodesics, stability
+│   ├── experiments.py     # 7-experiment verification suite (Exps 1–7)
+│   ├── procedural.py      # Procedural graph diagnostics pipeline
+│   ├── procedural_examples.py  # Standard examples runner + CLI
+│   ├── channel_image.py   # (dormant) Image-to-graph extraction pipeline
+│   └── pipeline.py        # (dormant) Image-to-spectral diagnostics pipeline
+├── fluid/                 # NEW v0.3.0
+│   ├── dynamics.py        # FluidKernelDynamics: MaxCal-governed flow learning
+│   └── experiments.py     # Experiment runners for fluid kernel trajectories
+└── bandits/               # NEW v0.3.0 — DDK-GPUCB simulation suite
+    ├── field.py           # SpatiotemporalField: (x,t) arms, SE×Per vs SE regions
+    ├── kernels.py         # AnisotropicSEKernel, SEPeriodicKernel, MixtureKernel
+    ├── network.py         # GossipNetwork: Metropolis P, Chebyshev mixing
+    ├── agents.py          # MixtureKernelAgent, DDKGPUCBAgent, StaticGPUCBAgent, DDUCBAgent
+    ├── experiment.py      # run_experiment(ExperimentConfig): 4-way comparison + plots
+    ├── run_server.py      # CLI runner with joblib parallelism + JSON checkpoint
+    └── README.md          # Subpackage docs and server usage
+
+ros2_ws/
+└── src/bloom_maxcal_sim/  # NEW v0.3.0 — ROS2 package
+    ├── bloom_field.py           # Spatiotemporal bloom field model
+    ├── maxcal_bloom_follower.py # MaxCal-guided rover trajectory
+    ├── rover_model.py           # Rover kinematics
+    ├── nodes/                   # ROS2 node wrappers
+    │   ├── bloom_field_node.py
+    │   ├── maxcal_controller_node.py
+    │   ├── rover_sim_node.py
+    │   └── visualizer_node.py
+    ├── demo_bloom_maxcal.py     # Standalone demo (no ROS2 needed)
+    ├── launch/bloom_sim.launch.py
+    └── config/default.yaml
 ```
 
 ### Energy monitoring
@@ -361,7 +456,16 @@ run_landauer_server.sh       # One-command: build → run → merge → figure
 | Hessian stability, Fiedler gap $\Delta'$ (Cor. 3†, Q6†) | `kernelcal.spectral.dynamics` |
 | Spectral entropy early-warning (Rem. 8†) | `kernelcal.spectral.dynamics` |
 
+| DDK-GPUCB regret decomposition (Thm. 1‡) | `kernelcal.bandits.experiment` |
+| Mixture kernel w/ logit-weight adaptation (‡) | `kernelcal.bandits.kernels.MixtureKernel` |
+| SE×Periodic product kernel (‡) | `kernelcal.bandits.kernels.SEPeriodicKernel` |
+| Chebyshev-accelerated gossip (Lem. 3.1‡) | `kernelcal.bandits.network.GossipNetwork` |
+| Fluid learning dynamics under MaxCal (§) | `kernelcal.fluid.dynamics` |
+| Bloom field MaxCal rover (§) | `ros2_ws/bloom_maxcal_sim` |
+
 *† from the companion spectral paper (in preparation)*
+*‡ from "Decentralised GP Bandits with Dynamic Kernels under MaxCal" (in preparation)*
+*§ from fluid learning manuscript (in preparation)*
 
 ---
 
