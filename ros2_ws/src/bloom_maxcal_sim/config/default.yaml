@@ -1,0 +1,61 @@
+# Default parameters for bloom_maxcal_sim
+# Override any value via CLI: ros2 launch bloom_maxcal_sim bloom_sim.launch.py gyre_A:=3.0
+#
+# Timescales: all three bloom processes produce visible change within ~30 s:
+#   advection  : u_max ≈ π·A/Ly ≈ 0.16 m/s → ~5 m patch shift in 30 s
+#   gyre cycle : T = 2π/ω = 25 s            → clearly oscillating within 30 s
+#   growth     : r ≈ 0.015 s⁻¹             → ~10–20 % amplitude in 30 s
+#   diffusion  : D ≈ 1.2 m²/s             → σ: 10 → 13 m (30 %) in 30 s
+
+bloom_field_node:
+  ros__parameters:
+    domain_lx: 100.0          # m
+    domain_ly: 100.0          # m
+    grid_nx: 120
+    grid_ny: 120
+    gyre_A: 5.0               # stream amplitude → u_max ≈ 0.16 m/s (was 0.10)
+    gyre_eps: 0.30            # gyre oscillation amplitude ε (was 0.25)
+    gyre_omega: 0.25133       # ω = 2π/25 rad/s — 25-second period (was 2π/300)
+    sim_dt: 0.5               # bloom integration step (s)
+    publish_rate: 2.0         # Hz
+    sigma_wind: 0.25          # turbulent patch noise (m/√s) — stochastic meandering (was 0.008)
+    seed: 42
+
+rover_sim_node:
+  ros__parameters:
+    x0: 50.0                  # initial rover x (m)
+    y0: 50.0                  # initial rover y (m)
+    theta0: 0.0               # initial heading (rad)
+    sim_dt: 0.05              # rover integration step (s)
+    publish_rate: 20.0        # Hz
+    v_max: 1.5                # m/s
+    omega_max: 1.2            # rad/s
+    sigma_obs: 0.02           # bloom observation noise
+    sigma_dir: 0.15           # gradient direction noise (rad)
+    seed: 123
+
+maxcal_controller_node:
+  ros__parameters:
+    control_rate: 2.0         # Hz — MaxCal solve + command rate
+    n_candidates: 32          # candidate next-positions per step
+    lookahead_min: 3.0        # inner ring radius (m)
+    lookahead_max: 10.0       # outer ring radius (m)
+    sigma_q: 6.0              # Gaussian proximity prior width (m)
+    bloom_target_q: 0.65      # bloom conc. target: top 35th percentile of candidates
+    gradient_target_q: 0.55   # gradient target: above median
+    distance_target_frac: 0.50 # energy budget: mean candidate distance ≤ 50% lookahead_max
+    kernel_length_scale: 5.0  # RBF kernel ℓ for HS distance tracking (m)
+    v_max: 1.2                # m/s
+    k_omega: 1.8              # rad/s per rad (heading proportional gain)
+    arrival_radius: 2.5       # m — waypoint arrival threshold
+    domain_lx: 100.0
+    domain_ly: 100.0
+    seed: 7
+
+visualizer_node:
+  ros__parameters:
+    update_rate: 2.0          # Hz
+    quiver_skip: 8            # plot every Nth velocity grid point
+    cmap: YlGn                # matplotlib colormap
+    figsize_w: 14.0
+    figsize_h: 7.0

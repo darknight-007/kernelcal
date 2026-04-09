@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>bloom_maxcal_sim</name>
+  <version>0.1.0</version>
+  <description>
+    Maximum Caliber-based algae bloom following with a simulated 2D rover.
+
+    Implements the adaptive algal-bloom sampling scenario from Section VI.C of
+    "Kernel Dynamics under Path Entropy Maximization" (arXiv:2603.27880).
+    The bloom field is modelled as a superposition of anisotropic Gaussian
+    patches advecting under a double-gyre stream function.  The MaxCal
+    controller selects velocity commands from a path-entropy-maximising
+    distribution over candidate waypoints, using the kernelcal library for
+    Lagrange multiplier fitting and HS-kernel trajectory tracking.
+  </description>
+
+  <maintainer email="jnaneshwar.das@asu.edu">Jnaneshwar Das</maintainer>
+  <license>MIT</license>
+
+  <url type="website">https://github.com/Earth-Innovation-Hub/deepgis-maxcal-integration</url>
+  <url type="repository">https://github.com/Earth-Innovation-Hub/deepgis-maxcal-integration</url>
+
+  <author email="jnaneshwar.das@asu.edu">Jnaneshwar Das</author>
+
+  <!-- ROS2 build tool -->
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- Runtime ROS2 dependencies -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+
+  <!-- Python dependencies (managed via pip / requirements) -->
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
