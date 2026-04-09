@@ -36,6 +36,10 @@ models
 prompts
     Self-consistent prompt iteration for Grounding DINO.
 
+fluid
+    Discrete kernel-fluid dynamics on graph-structured kernel space, including
+    a runnable 20-node two-phase experiment with diagnostics.
+
 spectral
     Spectral kernel dynamics on finite graphs: SpectralGraph, GaussianMISource,
     SpectralKernelDynamics, and a six-experiment verification suite that makes
@@ -100,6 +104,17 @@ from .attention import (
     run_attention_experiment,
     AttentionExperimentResult,
 )
+from .fluid import (
+    FluidGraph,
+    PotentialLandscape,
+    FluidSimulationConfig,
+    FluidSimulationResult,
+    ring_distance,
+    gaussian_bump_on_ring,
+    make_twenty_node_reference_landscape,
+    simulate_kernel_fluid,
+    save_timeseries_csv,
+)
 from .spectral import (
     SpectralGraph,
     GaussianMISource,
@@ -161,6 +176,17 @@ __all__ = [
     "AttentionKernelTracker",
     "run_attention_experiment",
     "AttentionExperimentResult",
+    # fluid
+    "FluidGraph",
+    "PotentialLandscape",
+    "FluidSimulationConfig",
+    "FluidSimulationResult",
+    "ring_distance",
+    "gaussian_bump_on_ring",
+    "make_twenty_node_reference_landscape",
+    "simulate_kernel_fluid",
+    "save_timeseries_csv",
+    "run_twenty_node_experiment",
     # spectral
     "SpectralGraph",
     "GaussianMISource",
@@ -185,6 +211,9 @@ def __getattr__(name: str):
     if name == "run_procedural_examples":
         from .spectral.procedural_examples import run_procedural_examples
         return run_procedural_examples
+    if name == "run_twenty_node_experiment":
+        from .fluid.experiments import run_twenty_node_experiment
+        return run_twenty_node_experiment
     # Backward-compatible access to dormant image pipeline symbols.
     if name in {
         "ChannelEdge",

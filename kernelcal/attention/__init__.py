@@ -28,6 +28,7 @@ Quick-start
 from .kernel import AttentionKernel, AttentionKernelResult
 from .tracker import AttentionKernelTracker
 from .experiment import run_attention_experiment, AttentionExperimentResult
+from .energy import EnergyMonitor, EnergyReport
 
 __all__ = [
     "AttentionKernel",
@@ -35,4 +36,6 @@ __all__ = [
     "AttentionKernelTracker",
     "run_attention_experiment",
     "AttentionExperimentResult",
+    "EnergyMonitor",
+    "EnergyReport",
 ]

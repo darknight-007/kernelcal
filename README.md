@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
-> **Status:** research companion library, v0.1.0 — pre-publication, API subject to change.
+> **Status:** research companion library, v0.2.0 — pre-publication, API subject to change.
 
 Companion library to:
 
@@ -32,7 +32,7 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.models` | MaxCal multi-model selector (SAM / YOLOv8 / Grounding DINO / ...) |
 | `kernelcal.prompts` | Self-consistent Grounding DINO prompt iteration |
 | `kernelcal.spectral` | Spectral kernel dynamics on finite graphs: fixed points, geodesics, stability, phase-transition diagnostics |
-| `kernelcal.attention` | MaxCal diagnostics on transformer attention kernels: GPT-2 probing, toy training, Landauer bound experiment |
+| `kernelcal.attention` | MaxCal diagnostics on transformer attention kernels: GPT-2 probing, toy training, Landauer bound, perturbation-relaxation, grokking phase detection |
 
 ---
 
@@ -165,14 +165,35 @@ python -m kernelcal.attention.training \
     --output-dir figures/attention
 ```
 
-Run the Landauer bound experiment on a 2×GPU server:
+### New experiments (v0.2.0)
+
+**Perturbation-relaxation** — test whether converged kernels are dynamical attractors:
 
 ```bash
-# One-command Docker launcher (splits widths across 2 GPUs)
-# Record your smart-plug / PDU kWh reading BEFORE running:
-bash run_landauer_server.sh      # prompts for wall-plug before/after readings
+# Requires a checkpoint from a grokking or training run
+python -m kernelcal.attention.perturbation \
+    --checkpoint figures/grokking/checkpoints/step_050000.pt \
+    --sigmas 0.01 0.05 0.1 0.2 \
+    --relax-steps 2000 \
+    --output-dir figures/perturbation
+```
 
-# Or directly (no Docker):
+**Extended grokking** — spectral diagnostics across the memorization→generalization phase transition:
+
+```bash
+# Full experiment: 50K steps, width scaling, 50 seeds
+python -m kernelcal.attention.grokking \
+    --primes 23 53 97 --widths 64 128 256 \
+    --seeds 50 --steps 50000 \
+    --output-dir figures/grokking
+
+# Quick test (~2 min)
+python -m kernelcal.attention.grokking --quick
+```
+
+**Landauer bound** — energy is auto-detected from GPU/RAPL/FLOPs (no manual kWh entry):
+
+```bash
 python -m kernelcal.attention.landauer \
     --widths 128 256 512 1024 \
     --lrs 1e-2 1e-3 1e-4 1e-5 \
@@ -180,22 +201,14 @@ python -m kernelcal.attention.landauer \
     --output-dir ~/landauer_results
 ```
 
-Add wall-plug kWh delta retroactively (if you recorded it manually):
+When wifi wall-power meters are available, pass a callback:
 
-```bash
-python3 add_wall_power.py \
-    --results ~/landauer_results \
-    --wall-kwh 0.004 \
-    --n-gpus 2
-# Adds wall_kwh and ratio_wall_per_I columns, regenerates figures
-# including GPU vs wall-plug overhead comparison
-```
+```python
+from kernelcal.attention.energy import EnergyMonitor
 
-Merge results after a completed parallel run:
-
-```bash
-bash merge_landauer_results.sh ~/landauer_results
-# Merges gpu0/ + gpu1/ JSONs and regenerates all figures
+monitor = EnergyMonitor.auto_detect(
+    wall_watts_callback=lambda: my_wifi_meter.read_watts()
+)
 ```
 
 ### Spectral kernel dynamics on a graph
@@ -273,8 +286,11 @@ kernelcal/
 │   ├── kernel.py          # AttentionKernel: spectral MaxCal on attention matrices
 │   ├── tracker.py         # AttentionKernelTracker: forward-hook training logger
 │   ├── experiment.py      # Frozen GPT-2 probing, synthetic mode, null-model check
-│   ├── training.py        # Toy training loop + 30-run ensemble with MaxCal diagnostics
-│   └── landauer.py        # pynvml power logging + CKA ΔI + Landauer bound sweep
+│   ├── training.py        # Training loop + ensemble with MaxCal diagnostics + checkpoints
+│   ├── energy.py          # EnergyMonitor: auto-detect GPU/RAPL/FLOPs, wall-meter callback
+│   ├── perturbation.py    # Perturbation-relaxation: perturb head, resume, measure return
+│   ├── grokking.py        # Extended grokking: 50K steps, per-head diagnostics, phase detection
+│   └── landauer.py        # CKA ΔI + auto energy monitoring + Landauer bound sweep
 └── spectral/
     ├── graph.py           # SpectralGraph: Laplacian eigendecomposition, factory methods
     ├── source.py          # GaussianMISource, CoupledGaussianMISource
@@ -286,6 +302,28 @@ kernelcal/
     └── pipeline.py        # (dormant) Image-to-spectral diagnostics pipeline
 ```
 
+### Energy monitoring
+
+`EnergyMonitor` auto-detects all available power sources — no manual entry needed:
+
+| Source | How | Priority |
+|---|---|---|
+| GPU hardware counter | `pynvml` `nvmlDeviceGetTotalEnergyConsumption` | Highest (most accurate) |
+| GPU power polling | `pynvml` 500ms polls, trapezoidal integration | Fallback |
+| Intel RAPL | `/sys/class/powercap/intel-rapl/*/energy_uj` | CPU + DRAM |
+| FLOPs estimate | `6 × n_params × batch_tokens` at ~0.5 pJ/FLOP | Always available |
+| Wall-power meter | User-supplied callback (wifi smart plug) | Authoritative when present |
+
+```python
+from kernelcal.attention.energy import EnergyMonitor
+
+monitor = EnergyMonitor.auto_detect()
+monitor.start()
+# ... training ...
+report = monitor.stop()
+print(f"{report.total_joules:.2f} J  sources={report.sources_used}")
+```
+
 ### Server deployment (Landauer experiment)
 
 For the Landauer bound experiment on a 2×GPU server:
@@ -294,22 +332,7 @@ For the Landauer bound experiment on a 2×GPU server:
 Dockerfile.landauer          # CUDA 12.1 + PyTorch 2.2 container
 docker-compose.landauer.yml  # 2-GPU parallel sweep (widths split per GPU)
 run_landauer_server.sh       # One-command: build → run → merge → figure
-merge_landauer_results.sh    # Merge + plot after a completed run
-add_wall_power.py            # Inject wall-plug kWh into existing results
-requirements.landauer.txt    # nvidia-ml-py, transformers, matplotlib
 ```
-
-```bash
-# Build once, run across 2 GPUs in parallel
-# (prompts for smart-plug / PDU kWh readings before and after)
-bash run_landauer_server.sh
-
-# Results → ~/landauer_results/landauer_results_merged.json
-#           ~/landauer_results/fig_landauer_results.pdf
-#           ~/landauer_results/fig_landauer_wall.pdf   (with wall-plug data)
-```
-
-**Wall-plug measurement:** For the true thermodynamic bound, record the kWh delta on a smart plug / PDU attached to the server before and after the experiment. The `add_wall_power.py` script injects this into the results and computes the GPU/wall overhead factor.
 
 ---
 
@@ -329,6 +352,9 @@ bash run_landauer_server.sh
 | Endogenous landscape (Obs.~1) | `kernelcal.attention.kernel` |
 | Fixed-point structural probe (GPT-2) | `kernelcal.attention.experiment` |
 | Landauer bound experiment (H3) | `kernelcal.attention.landauer` |
+| Perturbation-relaxation (H4) | `kernelcal.attention.perturbation` |
+| Grokking as spectral phase transition (H5/OQ3) | `kernelcal.attention.grokking` |
+| Auto energy monitoring | `kernelcal.attention.energy` |
 | Spectral geometric functional $\mathcal{R}_l$ (Prop. 1†) | `kernelcal.spectral.dynamics` |
 | Self-consistent kernels via exponential tilting (Cor. 1†) | `kernelcal.spectral.dynamics` |
 | Log-linear Fisher–Rao geodesics (Cor. 2†) | `kernelcal.spectral.dynamics` |

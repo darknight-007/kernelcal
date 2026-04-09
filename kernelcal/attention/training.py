@@ -155,10 +155,19 @@ def run_training_experiment(
     mu2: float = 2.0,
     device_str: Optional[str] = None,
     output_dir: Optional[str] = None,
+    checkpoint_every: int = 0,
+    monitor_energy: bool = True,
     verbose: bool = True,
 ) -> List[TrainingRecord]:
     """
     Train a tiny transformer on modular addition and log MaxCal diagnostics.
+
+    Parameters
+    ----------
+    checkpoint_every : int
+        Save model checkpoint every N steps (0 = no checkpoints).
+    monitor_energy : bool
+        Auto-detect and log energy consumption (GPU/RAPL/FLOPs).
 
     Returns a list of TrainingRecord snapshots.
     """
@@ -175,6 +184,20 @@ def run_training_experiment(
     model   = _build_model(prime, d_model, n_heads, n_layers, device)
     opt     = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     train_d, val_d = _make_dataset(prime, device)
+    n_params = sum(p.numel() for p in model.parameters())
+
+    energy_monitor = None
+    if monitor_energy:
+        from .energy import EnergyMonitor
+        energy_monitor = EnergyMonitor.auto_detect()
+        energy_monitor.start()
+        if verbose:
+            print(f"[training] energy sources: {energy_monitor._sources}")
+
+    ckpt_dir = None
+    if checkpoint_every > 0 and output_dir:
+        ckpt_dir = Path(output_dir) / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # Previous kernel snapshots for velocity
     prev_h: Dict[Tuple[int,int], np.ndarray] = {}
@@ -192,6 +215,17 @@ def run_training_experiment(
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
+
+        if energy_monitor is not None:
+            batch_tokens = seqs[:, :-1].numel()
+            energy_monitor.add_training_step(n_params, batch_tokens)
+
+        if ckpt_dir and checkpoint_every > 0 and step > 0 and step % checkpoint_every == 0:
+            torch.save({
+                'step': step, 'model': model.state_dict(),
+                'optimizer': opt.state_dict(), 'prime': prime,
+                'd_model': d_model, 'n_heads': n_heads, 'n_layers': n_layers,
+            }, ckpt_dir / f"step_{step:06d}.pt")
 
         # ── logging ───────────────────────────────────────────────────
         if step % log_every != 0:
@@ -212,8 +246,6 @@ def run_training_experiment(
 
         # ── MaxCal diagnostics for each layer/head ────────────────────
         from .kernel import AttentionKernel
-        from ..spectral.dynamics import spectral_entropy, field_equation_residual
-        from ..spectral.source import GaussianMISource
 
         residuals_step = []
         entropies_step = []
@@ -232,35 +264,16 @@ def run_training_experiment(
                                      eigenvalue_aware=True)
                 res = ak.analyse(fp_max_iter=100, fp_tol=1e-7)
 
-                # residual
-                from ..spectral.source import GaussianMISource as _GMS
-                from ..spectral.graph import SpectralGraph as _SG
-                from ..spectral.dynamics import field_equation_residual as _fer
-                L  = ak._AttentionKernel__class_laplacian(ak._K) if hasattr(ak, '_AttentionKernel__class_laplacian') else AttentionKernel._laplacian_from_kernel(ak._K)
-                g  = _SG(L)
-                src = _GMS(sigma2=sigma2, mu2=mu2, eigenvalues=g.eigenvalues)
-                from ..spectral.dynamics import SpectralKernelDynamics as _SKD
-                dyn = _SKD(g, src)
-                fp  = dyn.fixed_point_iteration(max_iter=100, tol=1e-7)
-                T_vals = src.T(fp.h_star)
-                resid  = float(np.max(np.abs(
-                    _fer(fp.h_star, dyn.h0, T_vals)
-                )))
-
-                # velocity
                 key = (li, hi)
                 vel = 0.0
                 if key in prev_h:
-                    vel = float(np.linalg.norm(fp.h_star - prev_h[key]))
-                prev_h[key] = fp.h_star.copy()
+                    vel = float(np.linalg.norm(res.h_star - prev_h[key]))
+                prev_h[key] = res.h_star.copy()
 
-                from ..spectral.dynamics import spectral_entropy as _se
-                residuals_step.append(resid)
-                entropies_step.append(float(_se(fp.h_star)))
-                from ..spectral.dynamics import StabilityResult
-                stab = dyn.stability_analysis(fp.h_star)
-                delta_step.append(float(stab.fiedler_gap))
-                lam1_step.append(float(g.fiedler_value))
+                residuals_step.append(res.residual_inf_norm)
+                entropies_step.append(res.spectral_entropy)
+                delta_step.append(res.fiedler_gap)
+                lam1_step.append(res.fiedler_value)
                 velocity_step.append(vel)
 
         rec = TrainingRecord(
@@ -285,11 +298,26 @@ def run_training_experiment(
         model.train()
 
     elapsed = time.time() - t0
+
+    energy_report = None
+    if energy_monitor is not None:
+        energy_report = energy_monitor.stop()
+        if verbose:
+            print(f"[training] energy: {energy_report.total_joules:.2f} J "
+                  f"({energy_report.total_wh:.6f} Wh)  "
+                  f"mean_power={energy_report.mean_power_watts:.1f} W  "
+                  f"sources={energy_report.sources_used}")
+
     if verbose:
         print(f"[training] done  {elapsed:.1f}s  {n_steps/elapsed:.0f} steps/s")
 
     if output_dir:
-        _save_results(records, Path(output_dir), verbose)
+        out = Path(output_dir)
+        _save_results(records, out, verbose)
+        if energy_report is not None:
+            import json
+            (out / 'energy_report.json').write_text(
+                json.dumps(energy_report.summary(), indent=2))
 
     return records
 

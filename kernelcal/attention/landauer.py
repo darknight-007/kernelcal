@@ -301,7 +301,15 @@ def run_single_landauer(
         model(probe)
         K_init = model.attn_kernel_flat(probe.shape[1])
 
-    # Start power monitoring
+    # Start unified energy monitoring (auto-detects GPU/RAPL/FLOPs)
+    from .energy import EnergyMonitor
+    energy = EnergyMonitor.auto_detect(
+        gpu_device_id=device_id if torch.cuda.is_available() else 0
+    )
+    energy.start()
+    n_params = sum(p.numel() for p in model.parameters())
+
+    # Legacy monitor for backward compat
     monitor = GPUPowerMonitor(device_id=device_id if torch.cuda.is_available() else 0)
     monitor.start()
 
@@ -320,6 +328,9 @@ def run_single_landauer(
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
 
+        batch_tokens = seqs[:, :-1].numel()
+        energy.add_training_step(n_params, batch_tokens)
+
         if (step+1) % 100 == 0:
             with torch.inference_mode():
                 model(probe)
@@ -328,6 +339,7 @@ def run_single_landauer(
             velocities.append(vel)
             prev_K = K_new.copy()
 
+    energy_report = energy.stop()
     watt_hours = monitor.stop()
 
     # Capture final kernel and compute ΔI = 1 - CKA(initial, final)
@@ -345,19 +357,22 @@ def run_single_landauer(
         acc  = (pred == train_data[:, 4]).float().mean().item()
 
     elapsed = time.time() - t0
+
+    best_wh = energy_report.total_wh if energy_report.total_joules > 0 else watt_hours
+    best_sources = energy_report.sources_used
+
     if verbose:
         print(f"  d={d_model:4d} lr={lr:.0e} seed={seed}  "
               f"loss->{loss.item():.3f}  acc={acc:.3f}  "
-              f"W={watt_hours:.4f} Wh  ΔI={delta_I:.4f}  "
-              f"ratio={watt_hours/(delta_I+1e-9):.4f}  {elapsed:.1f}s  [{monitor.backend}]")
+              f"W={best_wh:.6f} Wh  ΔI={delta_I:.4f}  "
+              f"ratio={best_wh/(delta_I+1e-9):.6f}  {elapsed:.1f}s  "
+              f"sources={best_sources}")
 
-    backend_str = monitor.backend
-    if monitor.used_hw_counter:
-        backend_str += '+hw_counter'
+    backend_str = '+'.join(best_sources)
 
     return LandauerRunResult(
         d_model=d_model, lr=lr, seed=seed, n_steps=n_steps,
-        watt_hours=watt_hours, delta_I=delta_I,
+        watt_hours=best_wh, delta_I=delta_I,
         kernel_velocity_mean=float(np.mean(velocities)) if velocities else 0.0,
         train_acc=acc, backend=backend_str,
         step_velocities=velocities,
