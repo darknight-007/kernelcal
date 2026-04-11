@@ -126,6 +126,13 @@ from .spectral import (
     hessian_gap,
     coupling_entropy,
 )
+from .video import (
+    CompressedDepthFrame,
+    DepthStreamCodec,
+    DepthStreamConfig,
+    depth_image_to_xyz,
+    pointcloud2_to_xyz,
+)
 from .geo3d import (
     CompressedMeshGeometry,
     CompressedSpectralKernel,
@@ -229,6 +236,12 @@ __all__ = [
     "spectral_entropy",
     "hessian_gap",
     "coupling_entropy",
+    # video
+    "CompressedDepthFrame",
+    "DepthStreamCodec",
+    "DepthStreamConfig",
+    "depth_image_to_xyz",
+    "pointcloud2_to_xyz",
     # geo3d
     "subsample_points",
     "knn_symmetric_adjacency",
