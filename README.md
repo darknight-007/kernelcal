@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
-> **Status:** research companion library, v0.4.0 — pre-publication, API subject to change.
+> **Status:** research companion library, v0.4.2 — pre-publication, API subject to change.
 
 Companion library to:
 
@@ -35,7 +35,7 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.attention` | MaxCal diagnostics on transformer attention kernels: GPT-2 probing, toy training, Landauer bound, perturbation-relaxation, grokking phase detection |
 | `kernelcal.fluid` | Fluid learning dynamics under MaxCal; kernel-trajectory experiments for flow-based systems |
 | `kernelcal.bandits` | **Decentralised Dynamic-Kernel GP-UCB (DDK-GPUCB):** spatiotemporal bandit simulation with learnable mixture kernels, gossip consensus, and Chebyshev-accelerated mixing |
-| `kernelcal.geo3d` | **Spectral compression for 3D geometry:** point clouds, triangle meshes (DAE/OBJ), and temporal LiDAR sequences. Hodge Laplacian complex (L₀/L₁/L₂), persistent homology (0D/1D), compression ratio bounds, Nyström large-mesh path |
+| `kernelcal.geo3d` | **Spectral compression for 3D geometry:** point clouds, triangle meshes (DAE/OBJ), and temporal LiDAR sequences. Hodge Laplacian complex (L₀/L₁/L₂), persistent homology (0D/1D), compression ratio bounds, Nyström large-mesh path. **`score_compression()`** self-introspection: four-channel quality report (geometry / spectral / kernel / topology) with composite loss and grade |
 
 ---
 
@@ -168,7 +168,7 @@ python -m kernelcal.attention.training \
     --output-dir figures/attention
 ```
 
-### 3D spectral compression (v0.4.0) — `kernelcal.geo3d`
+### 3D spectral compression (v0.4.2) — `kernelcal.geo3d`
 
 Compress meshes, point clouds, and LiDAR sequences into truncated Laplacian spectral basis:
 
@@ -191,8 +191,66 @@ decompress_obj("terrain.kcmesh", "terrain_reconstructed.obj")
 
 ```python
 from kernelcal.geo3d import compress_dae, decompress_dae   # DAE round-trip (needs trimesh)
-from kernelcal.geo3d import compress_point_cloud, compress_temporal_clouds  # point clouds / LiDAR
+from kernelcal.geo3d import compress_point_cloud           # point clouds
+from kernelcal.geo3d import compress_temporal_clouds       # LiDAR sequences (stable_subsample=True)
 ```
+
+**Self-introspection — `score_compression()` (v0.4.2):**
+
+The package can assess its own compression quality across four orthogonal loss channels:
+geometry (vertex drift), spectral (frequency structure retention), kernel (HS norm retention),
+and topology (handles and components preserved).
+
+```python
+from kernelcal.geo3d import compress_mesh_roundtrip, score_compression, betti_numbers
+from kernelcal.geo3d.mesh import mesh_combinatorial_laplacian
+from kernelcal.spectral import SpectralGraph
+
+c = compress_mesh_roundtrip(vertices, faces, n_modes=64)
+
+# Optional: pass full Laplacian spectrum for kernel retention + spectral gap ratio
+L  = mesh_combinatorial_laplacian(len(vertices), faces)
+sg = SpectralGraph(L)
+
+score = score_compression(
+    c,
+    vertices_original=vertices,
+    eigenvalues_full=sg.eigenvalues,        # enables kernel_hs_relative, spectral_gap_ratio
+    betti=betti_numbers(len(vertices), faces),
+)
+print(score.summary())
+print(score.grade())        # "Excellent" / "Good" / "Fair" / "Poor"
+print(score.bottleneck)     # "geometry" / "spectral" / "topology"
+```
+
+Sample output:
+```
+── Compression Score ──────────────────────────────────
+  Grade:             Good  (loss=0.1243)
+  Bottleneck:        spectral
+
+  Modes / vertices:  k=64  /  V=10000  F=20000
+  Compression ratio: 4.62×  (10.4 bpv)
+
+  ── Geometry ──
+  Relative distortion:     0.1270
+  RMS vertex error:        0.003561
+
+  ── Spectral ──
+  Entropy (compressed): 3.8271
+  Entropy (max k modes):4.1589
+  Entropy retention:    0.9202
+  Kernel HS retention:  0.9714
+  Spectral gap at k:    0.2340  ✗ mid-cluster
+
+  ── Topology ──
+  Topology:             ✓ preserved  (margin=+61)
+────────────────────────────────────────────────────
+```
+
+`overall_loss` = 0.5 × geometry + 0.3 × spectral + 0.2 × topology.
+`spectral_gap_ratio` diagnoses whether the truncation at k falls on a natural cluster boundary
+(large gap → principled cut) or mid-cluster (gap near 0 → increase k or adjust τ).
 
 **Hodge topology layer:**
 
@@ -440,11 +498,11 @@ kernelcal/
 │   ├── graph3d.py         # k-NN adjacency, combinatorial Laplacian, subsampling
 │   ├── spectral_codec.py  # CompressedSpectralKernel, compress_point_cloud, heat-kernel weights
 │   ├── mesh.py            # CompressedMeshGeometry, compress/decompress_mesh_roundtrip, DAE IO
-│   ├── temporal.py        # compress_temporal_clouds: LiDAR sequences + HS path geometry
+│   ├── temporal.py        # compress_temporal_clouds: LiDAR sequences + HS path geometry; stable_subsample
 │   ├── hodge.py           # Hodge complex: B₁/B₂, L₀/L₁/L₂, Betti numbers, hodge_decompose
 │   ├── topology.py        # Persistent homology: 0D (union-find), 1D (matrix reduction), VR
-│   ├── bounds.py          # CompressionBounds: ratio formula, distortion, mode_count_for_topology
-│   └── large_mesh.py      # LargeMeshCompressed, LOBPCG sparse solver, load_obj, compress_obj
+│   ├── bounds.py          # CompressionBounds, CompressionScore, score_compression(); ratio, distortion, topology
+│   └── large_mesh.py      # LargeMeshCompressed, Nyström extension, LOBPCG, load_obj, compress_obj
 └── bandits/               # NEW v0.3.0 — DDK-GPUCB simulation suite
     ├── field.py           # SpatiotemporalField: (x,t) arms, SE×Per vs SE regions
     ├── kernels.py         # AnisotropicSEKernel, SEPeriodicKernel, MixtureKernel
