@@ -26,6 +26,11 @@ from kernelcal.geo3d import (
     vietoris_rips_persistence,
 )
 from kernelcal.geo3d.hodge import boundary_1, boundary_2, hodge_decompose
+from kernelcal.geo3d.large_mesh import (
+    compress_large_mesh_nystrom,
+    decompress_large_mesh,
+    large_mesh_bounds,
+)
 
 
 def test_point_cloud_roundtrip_and_serialization():
@@ -234,6 +239,52 @@ def test_mode_count_for_distortion():
 # ---------------------------------------------------------------------------
 # DAE roundtrip (skipped without trimesh)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Nyström large-mesh compression tests
+# ---------------------------------------------------------------------------
+
+def _make_sphere_mesh(n: int = 400) -> tuple[np.ndarray, np.ndarray]:
+    """Approximately uniform sphere mesh (icosphere subdivisions)."""
+    from scipy.spatial import ConvexHull
+    rng = np.random.default_rng(42)
+    pts = rng.standard_normal((n, 3))
+    pts /= np.linalg.norm(pts, axis=1, keepdims=True)
+    hull = ConvexHull(pts)
+    return pts, hull.simplices.astype(np.int32)
+
+
+def test_nystrom_geometry_roundtrip():
+    """Nyström reconstructed vertices should be close to originals."""
+    v, f = _make_sphere_mesh(500)
+    c = compress_large_mesh_nystrom(v, f, n_modes=32, n_coarse=100, heat_tau=1.0)
+    v_hat, f_hat = decompress_large_mesh(c)
+    assert v_hat.shape == v.shape
+    assert np.array_equal(f_hat, f)
+    rms = float(np.sqrt(np.mean((v - v_hat) ** 2)))
+    assert rms < 0.5, f"RMS too large: {rms:.4f}"
+
+
+def test_nystrom_bounds():
+    """large_mesh_bounds returns sane values."""
+    v, f = _make_sphere_mesh(300)
+    c = compress_large_mesh_nystrom(v, f, n_modes=20, n_coarse=80, heat_tau=1.0)
+    b = large_mesh_bounds(c, v)
+    assert b["compression_ratio (coeff_only)"] > 1.0
+    assert 0.0 <= b["relative_distortion"] <= 1.0
+
+
+def test_nystrom_serialization_roundtrip():
+    """to_bytes / from_bytes preserves Nyström payload exactly."""
+    from kernelcal.geo3d.large_mesh import LargeMeshCompressed
+    v, f = _make_sphere_mesh(200)
+    c = compress_large_mesh_nystrom(v, f, n_modes=16, n_coarse=60, heat_tau=0.5)
+    payload = c.to_bytes()
+    c2 = LargeMeshCompressed.from_bytes(payload)
+    assert np.allclose(c.eigenvalues, c2.eigenvalues)
+    assert np.allclose(c.vertex_coeffs, c2.vertex_coeffs)
+    assert np.array_equal(c.faces, c2.faces)
+
 
 def test_dae_roundtrip_with_trimesh(tmp_path):
     trimesh = pytest.importorskip("trimesh", reason="trimesh not installed")

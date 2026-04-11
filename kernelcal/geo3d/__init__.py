@@ -57,6 +57,7 @@ from .temporal import TemporalKernelSummary, compress_temporal_clouds
 from .large_mesh import (
     LargeMeshCompressed,
     compress_large_mesh,
+    compress_large_mesh_nystrom,
     compress_obj,
     decompress_large_mesh,
     decompress_obj,
@@ -105,6 +106,7 @@ __all__ = [
     # large_mesh
     "LargeMeshCompressed",
     "compress_large_mesh",
+    "compress_large_mesh_nystrom",
     "compress_obj",
     "decompress_large_mesh",
     "decompress_obj",

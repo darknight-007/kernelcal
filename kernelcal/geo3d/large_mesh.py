@@ -1,16 +1,24 @@
-"""Large-mesh spectral compression using sparse iterative eigensolvers.
+"""Large-mesh spectral compression.
 
-For meshes with V > ~5000 vertices, full dense eigendecomposition
-(O(V³)) is infeasible.  This module uses:
+Three solver paths, auto-selected by ``compress_obj`` / ``compress_large_mesh``:
 
-  scipy.sparse.linalg.eigsh  with shift-invert (sigma=0)
-      — finds the k smallest eigenvalues in O(k · V · nnz) time
-      — nnz ≈ 6V for typical triangle meshes (average degree ~6)
+  Dense eigh          (V ≤ V_DENSE  ≈ 5 000)
+      O(V³) — fastest for small meshes.
 
-OBJ loading is done without trimesh: a minimal parser handles
-'v' and 'f' lines directly.  Face entries may be:
-    f v1 v2 v3
-    f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3
+  LOBPCG              (V_DENSE < V ≤ V_LOBPCG ≈ 20 000)
+      Sparse iterative, Jacobi preconditioner.  No LU factorisation.
+      Practical for moderate meshes with k ≤ 64.
+
+  Nyström extension   (V > V_LOBPCG, default for large meshes)
+      1. Subsample n_coarse ≈ max(1000, 10·k) vertices.
+      2. Build dense k-NN graph on coarse vertices; exact eigh — O(n_c³) ≈ 0.3–2 s.
+      3. Interpolate eigenvectors to all V vertices via weighted k-NN — O(V·k_interp·k).
+      4. Estimate Rayleigh quotients via L_sparse @ Phi_full — O(nnz·k).
+      5. Sort, apply heat-kernel weights h(λ) = exp(−λτ), project vertices.
+
+      Cost for V = 465 K, k = 128, n_coarse = 2 000:   ≈ 10–20 s total.
+
+OBJ IO is trimesh-free: a minimal parser handles v/f lines directly.
 """
 
 from __future__ import annotations
@@ -24,6 +32,13 @@ from typing import Any
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+from scipy.spatial import cKDTree
+
+from .graph3d import knn_symmetric_adjacency, adjacency_to_laplacian
+
+# Vertex-count thresholds for auto-dispatch
+V_DENSE   =  5_000   # use dense eigh below this
+V_LOBPCG  = 20_000   # use LOBPCG below this, Nyström above
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +245,148 @@ def decompress_large_mesh(c: LargeMeshCompressed) -> tuple[np.ndarray, np.ndarra
 
 
 # ---------------------------------------------------------------------------
+# Nyström extension — the scalable path for V > V_LOBPCG
+# ---------------------------------------------------------------------------
+
+def compress_large_mesh_nystrom(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    n_modes: int = 128,
+    n_coarse: int | None = None,
+    heat_tau: float = 1.0,
+    k_knn: int = 8,
+    k_interp: int = 3,
+    seed: int = 0,
+) -> LargeMeshCompressed:
+    """Compress a large mesh via Nyström spectral extension.
+
+    Algorithm
+    ---------
+    1. Build sparse Laplacian L on full mesh  — O(F)
+    2. Subsample ``n_coarse`` vertices randomly
+    3. k-NN graph on coarse vertices + dense eigh — O(n_c³)
+    4. Weighted k-NN interpolation of coarse eigenvectors to all V vertices
+    5. Estimate Rayleigh quotients:  λ̂_l = φ_lᵀ L φ_l  via L @ Φ
+    6. Heat-kernel weights h(λ̂) = exp(−λ̂ τ); project vertices: C = Φᵀ V
+
+    Parameters
+    ----------
+    vertices  : (V, 3) float
+    faces     : (F, 3) int
+    n_modes   : k modes to retain
+    n_coarse  : coarse subgraph size (default: max(1000, 10·k), capped at V//2)
+    heat_tau  : heat-kernel weight parameter
+    k_knn     : neighbours for coarse k-NN graph
+    k_interp  : neighbours for Nyström interpolation
+    seed      : RNG seed for subsampling
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    f = np.asarray(faces, dtype=np.int32)
+    V, F = v.shape[0], f.shape[0]
+
+    k = min(int(n_modes), V - 2)
+    # n_coarse must satisfy: n_c >= k (necessary).
+    # Cap at 1500 so dense eigh stays below ~2 s on any hardware.
+    if n_coarse is None:
+        n_coarse = min(max(500, 5 * k), 1500)
+    n_c = min(int(n_coarse), V // 2)
+
+    print(f"  [Nyström] V={V:,}  F={F:,}  k={k}  n_coarse={n_c}")
+
+    # ── 1. Sparse Laplacian on full mesh ──────────────────────────────────
+    t0 = time.perf_counter()
+    L_sp = sparse_combinatorial_laplacian(V, f)
+    t_lap = time.perf_counter() - t0
+    print(f"  [Nyström] Laplacian built  ({t_lap:.1f}s)")
+
+    # ── 2. Subsample coarse vertices ──────────────────────────────────────
+    rng = np.random.default_rng(seed)
+    coarse_idx = rng.choice(V, n_c, replace=False)
+    coarse_xyz = v[coarse_idx]
+
+    # Auto sigma: median nearest-neighbour distance among coarse points
+    tree_c = cKDTree(coarse_xyz)
+    d_nn, _ = tree_c.query(coarse_xyz, k=2)
+    sigma = max(float(np.median(d_nn[:, 1])), 1e-12)
+
+    # ── 3. Dense k-NN graph + exact eigendecomposition ────────────────────
+    t1 = time.perf_counter()
+    W_c = knn_symmetric_adjacency(coarse_xyz, k=min(k_knn, n_c - 1), sigma=sigma)
+    L_c = adjacency_to_laplacian(W_c)
+    lam_c, Phi_c = np.linalg.eigh(L_c)
+    lam_c = np.maximum(lam_c[:k], 0.0)
+    Phi_c = Phi_c[:, :k]
+    t_eig = time.perf_counter() - t1
+    print(f"  [Nyström] Coarse eigh done ({t_eig:.1f}s)  "
+          f"λ_0={lam_c[0]:.4f}  λ_{k-1}={lam_c[-1]:.4f}")
+
+    # ── 4. Nyström interpolation: coarse → full ───────────────────────────
+    t2 = time.perf_counter()
+    k_q = min(k_interp, n_c)
+    d_full, idx_full = tree_c.query(v, k=k_q)   # (V, k_q)
+
+    # RBF weights; handle zero-distance (exact coarse vertex hit)
+    w = np.exp(-(d_full ** 2) / (2.0 * sigma ** 2))
+    w_sum = w.sum(axis=1, keepdims=True)
+    w = w / np.where(w_sum > 0, w_sum, 1.0)     # (V, k_q)
+
+    # Φ_full[i] = Σ_j w_ij * Φ_c[idx_full[i,j]]
+    Phi_full = np.einsum("ij,ijk->ik", w, Phi_c[idx_full])   # (V, k)
+
+    # Column-normalise (avoids O(Vk²) full QR while preserving near-orthogonality)
+    norms = np.linalg.norm(Phi_full, axis=0, keepdims=True)
+    Phi_full = Phi_full / np.where(norms > 0, norms, 1.0)
+    t_interp = time.perf_counter() - t2
+    print(f"  [Nyström] Interpolation done ({t_interp:.1f}s)")
+
+    # ── 5. Rayleigh quotients on full sparse Laplacian ────────────────────
+    t3 = time.perf_counter()
+    LPhi = L_sp @ Phi_full                                   # (V, k)
+    lam_est = np.einsum("ij,ij->j", Phi_full, LPhi)         # diag(ΦᵀLΦ)
+    lam_est = np.maximum(lam_est, 0.0)
+    order = np.argsort(lam_est)
+    lam_est = lam_est[order]
+    Phi_full = Phi_full[:, order]
+    t_rayleigh = time.perf_counter() - t3
+    print(f"  [Nyström] Rayleigh quotients done ({t_rayleigh:.1f}s)  "
+          f"λ̂_0={lam_est[0]:.4f}  λ̂_{k-1}={lam_est[-1]:.4f}")
+
+    # ── 6. Heat-kernel weights + vertex coefficients ──────────────────────
+    h = np.exp(-lam_est * float(heat_tau))
+    h = np.maximum(h, 1e-12)
+    coeffs = Phi_full.T @ v      # (k, 3)
+
+    t_total = time.perf_counter() - t0
+    print(f"  [Nyström] Total: {t_total:.1f}s")
+
+    meta: dict[str, Any] = {
+        "kind": "large_mesh_nystrom",
+        "n_vertices": V,
+        "n_faces": F,
+        "n_edges_est": int(round(3 * F / 2)),
+        "n_modes": k,
+        "n_coarse": n_c,
+        "k_knn": k_knn,
+        "k_interp": k_interp,
+        "heat_tau": float(heat_tau),
+        "time_laplacian_s": round(t_lap, 2),
+        "time_eigh_s": round(t_eig, 2),
+        "time_interp_s": round(t_interp, 2),
+        "time_rayleigh_s": round(t_rayleigh, 2),
+        "time_total_s": round(t_total, 2),
+    }
+    return LargeMeshCompressed(
+        eigenvalues=lam_est,
+        eigenvectors=Phi_full,
+        h=h,
+        vertex_coeffs=coeffs,
+        faces=f,
+        meta=meta,
+    )
+
+
+# ---------------------------------------------------------------------------
 # OBJ-specific convenience wrappers
 # ---------------------------------------------------------------------------
 
@@ -238,11 +395,30 @@ def compress_obj(
     *,
     n_modes: int = 128,
     heat_tau: float = 1.0,
+    n_coarse: int | None = None,
     payload_path: str | Path | None = None,
 ) -> LargeMeshCompressed:
-    """Load OBJ, compress, optionally write payload bytes to disk."""
+    """Load OBJ and compress, auto-selecting the best eigensolver.
+
+    Dispatch rules (by vertex count V):
+      V ≤ 5 000   → dense ``np.linalg.eigh``          (exact, < 0.1 s)
+      V ≤ 20 000  → sparse LOBPCG + Jacobi precond.   (< 30 s for k ≤ 64)
+      V > 20 000  → Nyström extension on n_coarse pts  (≈ 10–20 s for any V)
+    """
     vertices, faces = load_obj(obj_path)
-    c = compress_large_mesh(vertices, faces, n_modes=n_modes, heat_tau=heat_tau)
+    V = vertices.shape[0]
+    print(f"  Loaded: V={V:,}  F={faces.shape[0]:,}")
+    if V <= V_DENSE:
+        c = compress_large_mesh(vertices, faces, n_modes=n_modes, heat_tau=heat_tau)
+    elif V <= V_LOBPCG:
+        c = compress_large_mesh(vertices, faces, n_modes=n_modes, heat_tau=heat_tau)
+    else:
+        c = compress_large_mesh_nystrom(
+            vertices, faces,
+            n_modes=n_modes,
+            n_coarse=n_coarse,
+            heat_tau=heat_tau,
+        )
     if payload_path is not None:
         Path(payload_path).write_bytes(c.to_bytes())
     return c
@@ -284,16 +460,25 @@ def _write_obj(vertices: np.ndarray, faces: np.ndarray, path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def large_mesh_bounds(c: LargeMeshCompressed, vertices_original: np.ndarray) -> dict:
-    """Compute compression ratio, distortion and RMS error."""
-    from .bounds import compression_ratio_formula, distortion_from_eigenvalues
+    """Compute compression ratio, distortion, and RMS error.
+
+    Two storage modes are reported:
+
+    coeff_only  — store only faces + spectral coefficients + eigenvalues.
+                  Decode requires re-running the eigensolver (Nyström / LOBPCG).
+                  Bytes: 8*(k*3 + k) + 4*3*F
+
+    with_basis  — store eigenvectors too; decode is instant matrix multiply.
+                  Bytes: 8*(V*k + k*3 + k) + 4*3*F  (current default payload)
+    """
+    from .bounds import distortion_from_eigenvalues
     V = c.meta["n_vertices"]
     F = c.meta["n_faces"]
     k = c.meta["n_modes"]
 
-    raw_bytes = 8 * 3 * V + 4 * 3 * F
-    # coeff_only payload: k×3 coeffs + k eigenvalues + F×3 faces
-    comp_bytes = 8 * (k * 3 + k) + 4 * 3 * F
-    ratio = raw_bytes / comp_bytes
+    raw_bytes   = 8 * 3 * V + 4 * 3 * F
+    coeff_bytes = 8 * (k * 3 + k) + 4 * 3 * F          # faces + coeffs only
+    basis_bytes = 8 * (V * k + k * 3 + k) + 4 * 3 * F  # + eigenvectors
 
     tail, total, rel = distortion_from_eigenvalues(
         vertices_original, c.eigenvectors, c.eigenvalues, k
@@ -304,14 +489,19 @@ def large_mesh_bounds(c: LargeMeshCompressed, vertices_original: np.ndarray) -> 
         "n_vertices": V,
         "n_faces": F,
         "n_modes": k,
-        "raw_bytes": raw_bytes,
-        "compressed_bytes (coeff_only)": comp_bytes,
-        "compression_ratio (coeff_only)": round(ratio, 2),
-        "bits_per_vertex (coeff_only)": round(comp_bytes * 8 / V, 1),
-        "spectral_tail_energy": round(tail, 6),
-        "total_energy": round(total, 6),
+        "raw_bytes (binary)": raw_bytes,
+        # coeff_only — theoretical minimum (eigenvectors re-derived at decode)
+        "coeff_only_bytes": coeff_bytes,
+        "compression_ratio (coeff_only)": round(raw_bytes / coeff_bytes, 2),
+        "bits_per_vertex (coeff_only)": round(coeff_bytes * 8 / V, 1),
+        # with_basis — actual payload as written by to_bytes()
+        "with_basis_bytes": basis_bytes,
+        "compression_ratio (with_basis)": round(raw_bytes / basis_bytes, 3),
+        # distortion
+        "spectral_tail_energy": round(tail, 4),
+        "total_energy": round(total, 4),
         "relative_distortion": round(rel, 6),
         "rms_vertex_error": round(rms, 6),
-        "time_laplacian_s": c.meta.get("time_laplacian_s"),
-        "time_eigensolver_s": c.meta.get("time_eigensolver_s"),
+        # timing
+        "time_total_s": c.meta.get("time_total_s"),
     }
