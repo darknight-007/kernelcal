@@ -5,6 +5,7 @@ from kernelcal.geo3d import (
     CompressedMeshGeometry,
     CompressedSpectralKernel,
     CompressionBounds,
+    CompressionScore,
     HodgeSpectralBasis,
     PersistenceResult,
     betti_numbers,
@@ -23,6 +24,7 @@ from kernelcal.geo3d import (
     mesh_persistence,
     mode_count_for_distortion,
     mode_count_for_topology,
+    score_compression,
     vietoris_rips_persistence,
 )
 from kernelcal.geo3d.hodge import boundary_1, boundary_2, hodge_decompose
@@ -284,6 +286,103 @@ def test_nystrom_serialization_roundtrip():
     assert np.allclose(c.eigenvalues, c2.eigenvalues)
     assert np.allclose(c.vertex_coeffs, c2.vertex_coeffs)
     assert np.array_equal(c.faces, c2.faces)
+
+
+# ---------------------------------------------------------------------------
+# score_compression (self-introspection) tests
+# ---------------------------------------------------------------------------
+
+def test_score_compression_basic():
+    """score_compression returns a valid CompressionScore from a mesh."""
+    v, f = _tetra()
+    c = compress_mesh_roundtrip(v, f, n_modes=4)
+    b = betti_numbers(4, f)
+    score = score_compression(c, vertices_original=v, betti=b)
+
+    assert isinstance(score, CompressionScore)
+    assert 0.0 <= score.overall_loss <= 1.0
+    assert score.spectral_entropy_retention >= 0.0
+    assert score.compression_ratio > 0.0
+    assert score.topology_preserved is True   # k=4 >= β₀+β₁=1+0=1
+
+
+def test_score_compression_grade_range():
+    """grade() returns one of the four expected strings."""
+    v, f = _tetra()
+    c = compress_mesh_roundtrip(v, f, n_modes=4)
+    score = score_compression(c, vertices_original=v)
+    assert score.grade() in {"Excellent", "Good", "Fair", "Poor"}
+
+
+def test_score_compression_full_spectrum_extras():
+    """Providing eigenvalues_full enables spectral_gap_ratio and kernel_hs_relative."""
+    from kernelcal.spectral import SpectralGraph
+    from kernelcal.geo3d.mesh import mesh_combinatorial_laplacian
+
+    rng = np.random.default_rng(0)
+    v = rng.standard_normal((20, 3))
+    f_list = []
+    from scipy.spatial import ConvexHull
+    hull = ConvexHull(v)
+    f = hull.simplices.astype(np.int32)
+
+    c = compress_mesh_roundtrip(v, f, n_modes=8)
+    L = mesh_combinatorial_laplacian(v.shape[0], f)
+    sg = SpectralGraph(L)
+
+    score = score_compression(
+        c,
+        vertices_original=v,
+        eigenvalues_full=sg.eigenvalues,
+    )
+    assert score.kernel_hs_relative is not None
+    assert 0.0 < score.kernel_hs_relative <= 1.0
+    assert score.spectral_gap_ratio is not None
+
+
+def test_score_compression_summary_string():
+    """summary() produces a non-empty multi-line string."""
+    v, f = _tetra()
+    c = compress_mesh_roundtrip(v, f, n_modes=4)
+    score = score_compression(c, vertices_original=v, betti=betti_numbers(4, f))
+    s = score.summary()
+    assert "Grade" in s
+    assert "Bottleneck" in s
+    assert "Topology" in s
+
+
+def test_score_compression_topology_deficit():
+    """When k < β₀+β₁, topology_preserved is False and margin is negative."""
+    rng = np.random.default_rng(7)
+    from scipy.spatial import ConvexHull
+    pts = rng.standard_normal((50, 3))
+    pts /= np.linalg.norm(pts, axis=1, keepdims=True)
+    hull = ConvexHull(pts)
+    v = pts
+    f = hull.simplices.astype(np.int32)
+
+    # Compress with k=1 — almost certainly below β₀+β₁
+    c = compress_mesh_roundtrip(v, f, n_modes=1)
+    b = betti_numbers(v.shape[0], f)
+    score = score_compression(c, vertices_original=v, betti=b)
+
+    assert score.topology_margin is not None
+    # If β₀+β₁ > 1, topology is lost at k=1
+    if (b[0] + b[1]) > 1:
+        assert score.topology_preserved is False
+        assert score.topology_margin < 0
+
+
+def test_score_compression_no_vertices():
+    """Without vertices_original, geometry metrics are None but score still works."""
+    v, f = _tetra()
+    c = compress_mesh_roundtrip(v, f, n_modes=4)
+    score = score_compression(c)
+
+    assert score.relative_distortion is None
+    assert score.rms_vertex_error is None
+    assert 0.0 <= score.overall_loss <= 1.0
+    assert score.bottleneck in {"spectral", "topology", "geometry"}
 
 
 def test_dae_roundtrip_with_trimesh(tmp_path):

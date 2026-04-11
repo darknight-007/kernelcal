@@ -245,31 +245,20 @@ def persistence_1d(
         face_cols.append(col)
 
     pairs_1d: list[PersistencePair] = []
-    killed_edges: set[int] = set()
 
     for i, fid in enumerate(face_order):
         col = face_cols[i]
         if col:
             pivot = max(col)
-            killed_edges.add(pivot)
             birth_e = edge_list[pivot]
             birth_t = edge_weights.get(birth_e, 0.0)
             death_t = face_values[fid]
             if death_t > birth_t:
                 pairs_1d.append(PersistencePair(dim=1, birth=birth_t, death=death_t))
 
-    # Essential 1-cycles: edges not killed by any face
-    # (harmonic classes — correspond to handles)
-    essential_1 = 0
-    for eid in range(n_E):
-        if eid not in killed_edges:
-            # Check if this edge created a new cycle (wasn't a tree edge)
-            # Tree edges are those that merged components in 0D reduction.
-            pass
-
     all_pairs = result_0.pairs + pairs_1d
     n_components = result_0.betti_at_inf.get(0, 0)
-    # β₁ = n_E - n_V + n_components - pairs killed by faces
+    # β₁ via Euler: β₁ = n_E - n_V + β₀ - (finite 1-pairs killed by faces)
     beta1 = n_E - n_vertices + n_components - len(pairs_1d)
 
     return PersistenceResult(

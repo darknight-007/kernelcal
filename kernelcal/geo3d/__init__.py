@@ -31,6 +31,7 @@ from .topology import (
 )
 from .bounds import (
     CompressionBounds,
+    CompressionScore,
     compression_ratio_formula,
     compression_ratio_vs_modes,
     distortion_from_eigenvalues,
@@ -38,6 +39,7 @@ from .bounds import (
     estimate_compression_bounds,
     mode_count_for_distortion,
     mode_count_for_topology,
+    score_compression,
 )
 from .mesh import (
     CompressedMeshGeometry,
@@ -115,6 +117,7 @@ __all__ = [
     "sparse_combinatorial_laplacian",
     # bounds
     "CompressionBounds",
+    "CompressionScore",
     "compression_ratio_formula",
     "compression_ratio_vs_modes",
     "distortion_from_eigenvalues",
@@ -122,4 +125,5 @@ __all__ = [
     "estimate_compression_bounds",
     "mode_count_for_topology",
     "mode_count_for_distortion",
+    "score_compression",
 ]

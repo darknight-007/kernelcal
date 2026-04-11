@@ -10,19 +10,21 @@ Three solver paths, auto-selected by ``compress_obj`` / ``compress_large_mesh``:
       Practical for moderate meshes with k ≤ 64.
 
   Nyström extension   (V > V_LOBPCG, default for large meshes)
-      1. Subsample n_coarse ≈ max(1000, 10·k) vertices.
+      1. Subsample n_coarse ≈ max(500, 5·k, capped at 1500) vertices.
       2. Build dense k-NN graph on coarse vertices; exact eigh — O(n_c³) ≈ 0.3–2 s.
       3. Interpolate eigenvectors to all V vertices via weighted k-NN — O(V·k_interp·k).
       4. Estimate Rayleigh quotients via L_sparse @ Phi_full — O(nnz·k).
       5. Sort, apply heat-kernel weights h(λ) = exp(−λτ), project vertices.
 
-      Cost for V = 465 K, k = 128, n_coarse = 2 000:   ≈ 10–20 s total.
+      Constraint: n_coarse ≥ n_modes (required for coarse eigh to yield k eigenvectors).
+      Cost for V = 465 K, k = 128, n_coarse = 1 500:   ≈ 10–20 s total.
 
 OBJ IO is trimesh-free: a minimal parser handles v/f lines directly.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from io import BytesIO
@@ -33,6 +35,8 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 from scipy.spatial import cKDTree
+
+log = logging.getLogger(__name__)
 
 from .graph3d import knn_symmetric_adjacency, adjacency_to_laplacian
 
@@ -286,19 +290,25 @@ def compress_large_mesh_nystrom(
     V, F = v.shape[0], f.shape[0]
 
     k = min(int(n_modes), V - 2)
-    # n_coarse must satisfy: n_c >= k (necessary).
+    # n_coarse must satisfy: n_c >= k (coarse eigh produces n_c eigenvectors).
     # Cap at 1500 so dense eigh stays below ~2 s on any hardware.
     if n_coarse is None:
         n_coarse = min(max(500, 5 * k), 1500)
     n_c = min(int(n_coarse), V // 2)
 
-    print(f"  [Nyström] V={V:,}  F={F:,}  k={k}  n_coarse={n_c}")
+    if n_c < k:
+        raise ValueError(
+            f"n_coarse ({n_c}) must be >= n_modes ({k}). "
+            f"Pass n_coarse >= {k} explicitly, or reduce n_modes."
+        )
+
+    log.debug("[Nyström] V=%d  F=%d  k=%d  n_coarse=%d", V, F, k, n_c)
 
     # ── 1. Sparse Laplacian on full mesh ──────────────────────────────────
     t0 = time.perf_counter()
     L_sp = sparse_combinatorial_laplacian(V, f)
     t_lap = time.perf_counter() - t0
-    print(f"  [Nyström] Laplacian built  ({t_lap:.1f}s)")
+    log.debug("[Nyström] Laplacian built  (%.1fs)", t_lap)
 
     # ── 2. Subsample coarse vertices ──────────────────────────────────────
     rng = np.random.default_rng(seed)
@@ -318,8 +328,8 @@ def compress_large_mesh_nystrom(
     lam_c = np.maximum(lam_c[:k], 0.0)
     Phi_c = Phi_c[:, :k]
     t_eig = time.perf_counter() - t1
-    print(f"  [Nyström] Coarse eigh done ({t_eig:.1f}s)  "
-          f"λ_0={lam_c[0]:.4f}  λ_{k-1}={lam_c[-1]:.4f}")
+    log.debug("[Nyström] Coarse eigh done (%.1fs)  λ_0=%.4f  λ_%d=%.4f",
+              t_eig, lam_c[0], k - 1, lam_c[-1])
 
     # ── 4. Nyström interpolation: coarse → full ───────────────────────────
     t2 = time.perf_counter()
@@ -338,7 +348,7 @@ def compress_large_mesh_nystrom(
     norms = np.linalg.norm(Phi_full, axis=0, keepdims=True)
     Phi_full = Phi_full / np.where(norms > 0, norms, 1.0)
     t_interp = time.perf_counter() - t2
-    print(f"  [Nyström] Interpolation done ({t_interp:.1f}s)")
+    log.debug("[Nyström] Interpolation done (%.1fs)", t_interp)
 
     # ── 5. Rayleigh quotients on full sparse Laplacian ────────────────────
     t3 = time.perf_counter()
@@ -349,8 +359,8 @@ def compress_large_mesh_nystrom(
     lam_est = lam_est[order]
     Phi_full = Phi_full[:, order]
     t_rayleigh = time.perf_counter() - t3
-    print(f"  [Nyström] Rayleigh quotients done ({t_rayleigh:.1f}s)  "
-          f"λ̂_0={lam_est[0]:.4f}  λ̂_{k-1}={lam_est[-1]:.4f}")
+    log.debug("[Nyström] Rayleigh quotients done (%.1fs)  λ̂_0=%.4f  λ̂_%d=%.4f",
+              t_rayleigh, lam_est[0], k - 1, lam_est[-1])
 
     # ── 6. Heat-kernel weights + vertex coefficients ──────────────────────
     h = np.exp(-lam_est * float(heat_tau))
@@ -358,7 +368,7 @@ def compress_large_mesh_nystrom(
     coeffs = Phi_full.T @ v      # (k, 3)
 
     t_total = time.perf_counter() - t0
-    print(f"  [Nyström] Total: {t_total:.1f}s")
+    log.debug("[Nyström] Total: %.1fs", t_total)
 
     meta: dict[str, Any] = {
         "kind": "large_mesh_nystrom",
@@ -407,7 +417,7 @@ def compress_obj(
     """
     vertices, faces = load_obj(obj_path)
     V = vertices.shape[0]
-    print(f"  Loaded: V={V:,}  F={faces.shape[0]:,}")
+    log.debug("Loaded OBJ: V=%d  F=%d", V, faces.shape[0])
     if V <= V_DENSE:
         c = compress_large_mesh(vertices, faces, n_modes=n_modes, heat_tau=heat_tau)
     elif V <= V_LOBPCG:

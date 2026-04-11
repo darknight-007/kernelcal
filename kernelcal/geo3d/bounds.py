@@ -327,3 +327,306 @@ def mode_count_for_distortion(
     captured_ratio = cumulative / total
     idx = np.searchsorted(captured_ratio, 1.0 - target_rel_distortion)
     return int(np.clip(idx + 1, 1, N))
+
+
+# ============================================================================
+# Self-introspection: CompressionScore
+# ============================================================================
+
+@dataclass
+class CompressionScore:
+    """Multi-dimensional quality report for a spectral mesh compression.
+
+    Each field measures a different aspect of what was *lost* by keeping
+    only k Laplacian modes.  The framework identifies four orthogonal
+    loss channels:
+
+    Geometry  — how much do vertex positions drift?
+    Spectral  — how much of the kernel's frequency structure is preserved?
+    Kernel    — how much of the full kernel's inner-product norm is retained?
+    Topology  — do the mesh's handles and components survive?
+
+    ``overall_loss ∈ [0, 1]`` is a weighted composite; 0 is lossless,
+    1 is total destruction.  ``bottleneck`` names the dominant channel.
+
+    Attributes
+    ----------
+    n_vertices, n_faces, n_modes
+        Mesh dimensions and retained mode count.
+    compression_ratio, bits_per_vertex
+        Storage efficiency (raw_bytes / compressed_bytes).
+    relative_distortion, rms_vertex_error
+        Geometry loss.  ``None`` when no vertex coordinates are available.
+    spectral_entropy_compressed
+        H[h_k] = −∑ h̄_l log h̄_l for the k retained modes.
+    spectral_entropy_max
+        log(k): maximum achievable entropy for k modes (uniform weights).
+    spectral_entropy_retention
+        H[h_k] / log(k) ∈ [0, 1].  Near 1 means spectral weight is spread
+        evenly across retained modes; near 0 means all weight concentrates
+        on the lowest-frequency mode.
+    kernel_hs_norm
+        ||K̂||_HS = sqrt(∑_l h_l²): Hilbert–Schmidt norm of compressed kernel.
+    kernel_hs_relative
+        ||K̂||_HS / ||K_full||_HS ∈ (0, 1].  Requires ``eigenvalues_full``.
+        Near 1 means the compressed kernel captures most of the full kernel's
+        norm; near 0 means most spectral mass was truncated.
+    spectral_gap_ratio
+        (λ_{k+1} − λ_k) / max(λ_k, ε).  Large gap = natural truncation
+        point (eigenmodes cluster neatly below k); near 0 = cutting
+        mid-cluster.  Requires ``eigenvalues_full``.
+    topology_preserved
+        True iff k ≥ β₀ + β₁ (connected components and independent cycles
+        are preserved in the compressed representation).
+    topology_margin
+        k − (β₀ + β₁).  Positive = safety margin; negative = topological
+        information is being lost.
+    overall_loss
+        Weighted composite loss ∈ [0, 1].  Lower is better.
+    bottleneck
+        Which channel contributes most to ``overall_loss``.
+    """
+
+    # Identification
+    n_vertices: int
+    n_faces: int | None
+    n_modes: int
+
+    # Rate
+    compression_ratio: float
+    bits_per_vertex: float
+
+    # Geometry
+    relative_distortion: float | None
+    rms_vertex_error: float | None
+
+    # Spectral
+    spectral_entropy_compressed: float
+    spectral_entropy_max: float
+    spectral_entropy_retention: float
+
+    # Kernel norm
+    kernel_hs_norm: float
+    kernel_hs_relative: float | None
+
+    # Spectral gap at truncation
+    spectral_gap_ratio: float | None
+
+    # Topology
+    topology_preserved: bool | None
+    topology_margin: int | None
+
+    # Overall
+    overall_loss: float
+    bottleneck: str
+
+    def grade(self) -> str:
+        """Letter-grade based on overall_loss."""
+        loss = self.overall_loss
+        if loss < 0.05:
+            return "Excellent"
+        if loss < 0.15:
+            return "Good"
+        if loss < 0.35:
+            return "Fair"
+        return "Poor"
+
+    def summary(self) -> str:
+        lines = [
+            f"── Compression Score ──────────────────────────────────",
+            f"  Grade:             {self.grade()}  (loss={self.overall_loss:.4f})",
+            f"  Bottleneck:        {self.bottleneck}",
+            f"",
+            f"  Modes / vertices:  k={self.n_modes}  /  V={self.n_vertices}"
+            + (f"  F={self.n_faces}" if self.n_faces is not None else ""),
+            f"  Compression ratio: {self.compression_ratio:.2f}×"
+            f"  ({self.bits_per_vertex:.1f} bpv)",
+            f"",
+            f"  ── Geometry ──",
+        ]
+        if self.relative_distortion is not None:
+            lines += [
+                f"  Relative distortion:     {self.relative_distortion:.4f}",
+                f"  RMS vertex error:        {self.rms_vertex_error:.6f}",
+            ]
+        else:
+            lines.append("  (no vertex coordinates provided)")
+        lines += [
+            f"",
+            f"  ── Spectral ──",
+            f"  Entropy (compressed): {self.spectral_entropy_compressed:.4f}",
+            f"  Entropy (max k modes):{self.spectral_entropy_max:.4f}",
+            f"  Entropy retention:    {self.spectral_entropy_retention:.4f}",
+        ]
+        if self.kernel_hs_relative is not None:
+            lines.append(f"  Kernel HS retention:  {self.kernel_hs_relative:.4f}")
+        if self.spectral_gap_ratio is not None:
+            lines.append(
+                f"  Spectral gap at k:    {self.spectral_gap_ratio:.4f}"
+                + ("  ✓ natural cut" if self.spectral_gap_ratio > 0.5 else "  ✗ mid-cluster")
+            )
+        lines.append("")
+        lines.append("  ── Topology ──")
+        if self.topology_preserved is not None:
+            status = "✓ preserved" if self.topology_preserved else "✗ LOST"
+            lines.append(
+                f"  Topology:             {status}"
+                f"  (margin={self.topology_margin:+d})"
+            )
+        else:
+            lines.append("  (no Betti numbers provided)")
+        lines.append("────────────────────────────────────────────────────")
+        return "\n".join(lines)
+
+
+def _spectral_entropy(h: np.ndarray) -> float:
+    """H[h] = −∑ h̄_l log h̄_l, zero-safe."""
+    h = np.asarray(h, dtype=float)
+    total = h.sum()
+    if total <= 0:
+        return 0.0
+    h_bar = h / total
+    h_bar = np.where(h_bar > 0, h_bar, 1.0)
+    return float(-np.sum(h_bar * np.log(h_bar)))
+
+
+def score_compression(
+    compressed: Any,
+    *,
+    vertices_original: np.ndarray | None = None,
+    eigenvalues_full: np.ndarray | None = None,
+    betti: tuple[int, int, int] | None = None,
+    coeff_only: bool = True,
+) -> "CompressionScore":
+    """Compute a multi-dimensional quality score for a compressed mesh.
+
+    Parameters
+    ----------
+    compressed
+        Any of ``CompressedMeshGeometry``, ``LargeMeshCompressed``, or
+        ``CompressedSpectralKernel``.  Must expose ``.eigenvalues``,
+        ``.eigenvectors``, ``.h``, and ``.meta``.
+    vertices_original : (V, 3) array, optional
+        Original vertex positions.  Required for geometry metrics.
+    eigenvalues_full : (N,) array, optional
+        Full Laplacian spectrum (all N modes).  Required for
+        ``kernel_hs_relative`` and ``spectral_gap_ratio``.
+    betti : (β₀, β₁, β₂), optional
+        Betti numbers of the original mesh (from ``betti_numbers()``).
+    coeff_only : bool, default True
+        Storage model: True = eigenvectors re-derived at decode time.
+
+    Returns
+    -------
+    CompressionScore
+        Call ``.summary()`` for a human-readable report.
+    """
+    # ── Extract common fields via duck typing ─────────────────────────────
+    try:
+        eigenvalues = np.asarray(compressed.eigenvalues, dtype=float)
+        eigenvectors = np.asarray(compressed.eigenvectors, dtype=float)
+        h = np.asarray(compressed.h, dtype=float)
+        meta = compressed.meta if hasattr(compressed, "meta") else {}
+    except AttributeError as exc:
+        raise TypeError(
+            "compressed must expose .eigenvalues, .eigenvectors, .h, .meta"
+        ) from exc
+
+    k = len(h)
+    V = int(meta.get("n_vertices", eigenvectors.shape[0]))
+    F = meta.get("n_faces") or meta.get("n_faces", None)
+    F = int(F) if F is not None else None
+
+    # ── Compression rate ──────────────────────────────────────────────────
+    n_faces_for_storage = F if F is not None else 0
+    raw, comp = _storage(V, n_faces_for_storage, k, coeff_only)
+    ratio = raw / comp if comp > 0 else float("inf")
+    bpv = (comp * 8) / V if V > 0 else float("inf")
+
+    # ── Geometry loss ─────────────────────────────────────────────────────
+    rel_dist: float | None = None
+    rms_err: float | None = None
+    if vertices_original is not None:
+        v = np.asarray(vertices_original, dtype=float)
+        if v.shape == (V, 3) and eigenvectors.shape == (V, k):
+            tail, total, rel_dist = distortion_from_eigenvalues(
+                v, eigenvectors, eigenvalues, k
+            )
+            rms_err = float(np.sqrt(tail / V)) if V > 0 else 0.0
+
+    # ── Spectral loss ─────────────────────────────────────────────────────
+    h_entropy = _spectral_entropy(h)
+    h_entropy_max = float(np.log(k)) if k > 1 else 0.0
+    h_entropy_retention = (h_entropy / h_entropy_max) if h_entropy_max > 0 else 1.0
+
+    # ── Kernel HS norm and relative retention ─────────────────────────────
+    kernel_hs_norm = float(np.sqrt(np.sum(h ** 2)))
+    kernel_hs_relative: float | None = None
+    if eigenvalues_full is not None:
+        lam_full = np.asarray(eigenvalues_full, dtype=float)
+        tau = meta.get("heat_tau", 1.0) or 1.0
+        h_full = np.exp(-lam_full * float(tau))
+        h_full = np.maximum(h_full, 1e-12)
+        hs_full = float(np.sqrt(np.sum(h_full ** 2)))
+        kernel_hs_relative = kernel_hs_norm / hs_full if hs_full > 0 else None
+
+    # ── Spectral gap at truncation point ─────────────────────────────────
+    spectral_gap_ratio: float | None = None
+    if eigenvalues_full is not None and len(eigenvalues_full) > k:
+        lam_k = float(eigenvalues_full[k - 1])
+        lam_kp1 = float(eigenvalues_full[k])
+        denom = max(lam_k, 1e-12)
+        spectral_gap_ratio = (lam_kp1 - lam_k) / denom
+
+    # ── Topology ─────────────────────────────────────────────────────────
+    topo_preserved: bool | None = None
+    topo_margin: int | None = None
+    if betti is not None:
+        b0, b1, _ = betti
+        topo_margin = k - (b0 + b1)
+        topo_preserved = topo_margin >= 0
+
+    # ── Overall loss (weighted composite) ────────────────────────────────
+    # Geometry:  weight 0.5 if available, else proxy via spectral loss
+    # Spectral:  weight 0.3 (entropy retention loss)
+    # Topology:  weight 0.2 (binary penalty; 0 if topology preserved)
+    spectral_loss = 1.0 - h_entropy_retention
+    topology_penalty = 0.0
+    if topo_preserved is not None and not topo_preserved:
+        # Scale penalty by how far below the topology threshold k is
+        deficit = -(topo_margin or 0)
+        b_sum = (betti[0] + betti[1]) if betti else 1  # type: ignore[index]
+        topology_penalty = min(1.0, deficit / max(b_sum, 1))
+
+    if rel_dist is not None:
+        geo_loss = float(min(rel_dist, 1.0))
+        overall = 0.5 * geo_loss + 0.3 * spectral_loss + 0.2 * topology_penalty
+        components = {"geometry": 0.5 * geo_loss, "spectral": 0.3 * spectral_loss,
+                      "topology": 0.2 * topology_penalty}
+    else:
+        # No geometry available: re-weight remaining channels
+        overall = 0.6 * spectral_loss + 0.4 * topology_penalty
+        components = {"spectral": 0.6 * spectral_loss, "topology": 0.4 * topology_penalty}
+
+    overall = float(np.clip(overall, 0.0, 1.0))
+    bottleneck = max(components, key=lambda c: components[c])
+
+    return CompressionScore(
+        n_vertices=V,
+        n_faces=F,
+        n_modes=k,
+        compression_ratio=ratio,
+        bits_per_vertex=bpv,
+        relative_distortion=rel_dist,
+        rms_vertex_error=rms_err,
+        spectral_entropy_compressed=h_entropy,
+        spectral_entropy_max=h_entropy_max,
+        spectral_entropy_retention=h_entropy_retention,
+        kernel_hs_norm=kernel_hs_norm,
+        kernel_hs_relative=kernel_hs_relative,
+        spectral_gap_ratio=spectral_gap_ratio,
+        topology_preserved=topo_preserved,
+        topology_margin=topo_margin,
+        overall_loss=overall,
+        bottleneck=bottleneck,
+    )
