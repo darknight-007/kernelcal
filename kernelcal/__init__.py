@@ -159,7 +159,7 @@ from .geo3d import (
     vietoris_rips_persistence,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.4.0"
 
 __all__ = [
     # kernel

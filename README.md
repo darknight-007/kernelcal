@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
-> **Status:** research companion library, v0.3.0 — pre-publication, API subject to change.
+> **Status:** research companion library, v0.4.0 — pre-publication, API subject to change.
 
 Companion library to:
 
@@ -35,6 +35,7 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.attention` | MaxCal diagnostics on transformer attention kernels: GPT-2 probing, toy training, Landauer bound, perturbation-relaxation, grokking phase detection |
 | `kernelcal.fluid` | Fluid learning dynamics under MaxCal; kernel-trajectory experiments for flow-based systems |
 | `kernelcal.bandits` | **Decentralised Dynamic-Kernel GP-UCB (DDK-GPUCB):** spatiotemporal bandit simulation with learnable mixture kernels, gossip consensus, and Chebyshev-accelerated mixing |
+| `kernelcal.geo3d` | **Spectral compression for 3D geometry:** point clouds, triangle meshes (DAE/OBJ), and temporal LiDAR sequences. Hodge Laplacian complex (L₀/L₁/L₂), persistent homology (0D/1D), compression ratio bounds, Nyström large-mesh path |
 
 ---
 
@@ -166,6 +167,68 @@ python -m kernelcal.attention.training \
     --primes 23 53 97 --seeds 10 --steps 2000 \
     --output-dir figures/attention
 ```
+
+### 3D spectral compression (v0.4.0) — `kernelcal.geo3d`
+
+Compress meshes, point clouds, and LiDAR sequences into truncated Laplacian spectral basis:
+
+```python
+from kernelcal.geo3d import compress_obj, decompress_obj, large_mesh_bounds
+
+# Compress an OBJ terrain mesh (no trimesh required)
+c = compress_obj("terrain.obj", n_modes=128, heat_tau=1.0,
+                 payload_path="terrain.kcmesh")
+
+# Inspect compression ratio and distortion
+bounds = large_mesh_bounds(c, vertices_original)
+print(bounds)
+# {'compression_ratio (coeff_only)': 4.5, 'bits_per_vertex': 10.4,
+#  'relative_distortion': 0.0012, 'rms_vertex_error': 0.0031, ...}
+
+# Reconstruct
+decompress_obj("terrain.kcmesh", "terrain_reconstructed.obj")
+```
+
+```python
+from kernelcal.geo3d import compress_dae, decompress_dae   # DAE round-trip (needs trimesh)
+from kernelcal.geo3d import compress_point_cloud, compress_temporal_clouds  # point clouds / LiDAR
+```
+
+**Hodge topology layer:**
+
+```python
+from kernelcal.geo3d import betti_numbers, build_hodge_basis, mesh_persistence
+
+b0, b1, b2 = betti_numbers(n_vertices, faces)   # β₀ components, β₁ loops, β₂ voids
+basis = build_hodge_basis(n_vertices, faces, n_modes_0=64)
+
+result = mesh_persistence(n_vertices, faces, vertices_xyz)
+print(result.betti_at_inf)   # {0: 1, 1: 0}
+```
+
+**Compression bounds:**
+
+```python
+from kernelcal.geo3d import compression_ratio_formula, mode_count_for_topology
+
+ratio = compression_ratio_formula(n_vertices=10000, n_faces=20000, n_modes=64)
+# → 4.6× (coeff_only: eigenvectors recomputed at decode from faces)
+
+k_min = mode_count_for_topology(betti=(1, 2, 0))
+# → 3  (β₀ + β₁: minimum modes to preserve connected components + loops)
+```
+
+Storage model (`coeff_only=True`, eigenvectors recomputed at decode):
+
+| k modes | Ratio (V=10K, F=20K) | Bits / vertex |
+|---------|----------------------|---------------|
+| 32 | 9.1× | 5.2 bpv |
+| 64 | 4.6× | 10.4 bpv |
+| 128 | 2.3× | 20.8 bpv |
+
+Distortion = spectral tail energy ‖V − Φ_k Φ_kᵀ V‖²_F. Topology preserved iff k ≥ β₀ + β₁.
+
+---
 
 ### Decentralised Dynamic-Kernel GP-UCB (v0.3.0) — `kernelcal.bandits`
 
@@ -373,6 +436,15 @@ kernelcal/
 ├── fluid/                 # NEW v0.3.0
 │   ├── dynamics.py        # FluidKernelDynamics: MaxCal-governed flow learning
 │   └── experiments.py     # Experiment runners for fluid kernel trajectories
+├── geo3d/                 # NEW v0.4.0 — spectral 3D compression
+│   ├── graph3d.py         # k-NN adjacency, combinatorial Laplacian, subsampling
+│   ├── spectral_codec.py  # CompressedSpectralKernel, compress_point_cloud, heat-kernel weights
+│   ├── mesh.py            # CompressedMeshGeometry, compress/decompress_mesh_roundtrip, DAE IO
+│   ├── temporal.py        # compress_temporal_clouds: LiDAR sequences + HS path geometry
+│   ├── hodge.py           # Hodge complex: B₁/B₂, L₀/L₁/L₂, Betti numbers, hodge_decompose
+│   ├── topology.py        # Persistent homology: 0D (union-find), 1D (matrix reduction), VR
+│   ├── bounds.py          # CompressionBounds: ratio formula, distortion, mode_count_for_topology
+│   └── large_mesh.py      # LargeMeshCompressed, LOBPCG sparse solver, load_obj, compress_obj
 └── bandits/               # NEW v0.3.0 — DDK-GPUCB simulation suite
     ├── field.py           # SpatiotemporalField: (x,t) arms, SE×Per vs SE regions
     ├── kernels.py         # AnisotropicSEKernel, SEPeriodicKernel, MixtureKernel
