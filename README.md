@@ -6,13 +6,22 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
-> **Status:** research companion library, v0.4.2 — pre-publication, API subject to change.
+> **Status:** research companion library, v0.5.0 — pre-publication, API subject to change.
 
-Companion library to:
+Companion library to the **four-paper kernel dynamics series**:
 
-> **Kernel Dynamics under Path Entropy Maximization**
-> Jnaneshwar Das — School of Earth and Space Exploration, Arizona State University / Earth Innovation Hub
+> **P1 — Kernel Dynamics under Path Entropy Maximization**
+> Jnaneshwar Das — ASU School of Earth and Space Exploration
 > [arXiv:2603.27880](https://arxiv.org/abs/2603.27880)
+>
+> **P2 — Spectral Kernel Dynamics for Planetary Twins**
+> Topological Conservation, the Stability–Conservation Tradeoff, and Early Warning from Dust Devils to Rapid Intensification
+>
+> **P3 — Spectral Kernel Dynamics for Terrestrial Environmental Networks**
+> Flow Conservation, Biogeomorphic Coupling, and Cyber-Physical Twins
+>
+> **P4 — Spectral Kernel Dynamics as a Biosignature Framework**
+> Topological Detection of Optimal Controllers on Planetary Surfaces
 
 Integration reference for [DeepGIS-XR](https://github.com/Earth-Innovation-Hub/deepgis-xr), an AI-powered geospatial platform.
 
@@ -36,6 +45,7 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.fluid` | Fluid learning dynamics under MaxCal; kernel-trajectory experiments for flow-based systems |
 | `kernelcal.bandits` | **Decentralised Dynamic-Kernel GP-UCB (DDK-GPUCB):** spatiotemporal bandit simulation with learnable mixture kernels, gossip consensus, and Chebyshev-accelerated mixing |
 | `kernelcal.geo3d` | **Spectral compression for 3D geometry:** point clouds, triangle meshes (DAE/OBJ), and temporal LiDAR sequences. Hodge Laplacian complex (L₀/L₁/L₂), persistent homology (0D/1D), compression ratio bounds, Nyström large-mesh path. **`score_compression()`** self-introspection: four-channel quality report (geometry / spectral / kernel / topology) with composite loss and grade |
+| `kernelcal.terrain` | **Planetary terrain analysis and topological biosignature detection** (P2, P3, P4). DEM→graph pipeline (D8 flow routing, slope/curvature), crater rim detection and Betti numbers, drainage network graphs (Strahler ordering, max-flow/min-cut), the triple spectral diagnostic for channel detection (Proposition 3, P2), topological biosignature Δβ₁, cross-kernel factorization test, plume spectral entropy biosignature, fixed-point kernel, stability–conservation tradeoff (Route 3), bandwidth-optimal mode selection, observability ratio. **66 tests, stdlib-only (numpy + scipy).** |
 
 ---
 
@@ -60,6 +70,85 @@ pip install -e ".[torch]"
 > The code snippets below are schematic — variables such as `reward_scores`,
 > `kernel_snapshots`, and `embeddings_per_tile` represent arrays you supply
 > from your own pipeline.
+
+### Planetary terrain and biosignature analysis
+
+```python
+import numpy as np
+from kernelcal.terrain import (
+    synthetic_crater_dem, synthetic_channel_dem,
+    dem_to_graph, terrain_graph_laplacian,
+    d8_flow_direction, flow_accumulation,
+    drainage_network_graph, triple_spectral_diagnostic, topology_budget,
+    crater_rim_graph, crater_betti_numbers, abiotic_beta1_craters,
+    topological_biosignature, detection_threshold,
+    cross_kernel_norm, factorization_test,
+    plume_spectral_entropy, chemical_affinity_graph,
+    fixed_point_kernel, spectral_entropy, observability_ratio,
+    stability_conservation_tradeoff, phase_transition_sweep,
+)
+
+# ── Crater analysis (Moon / Mars) ──────────────────────────────────────────
+from kernelcal.terrain.craters import CraterCandidate
+
+dem_moon  = synthetic_crater_dem(nrows=64, ncols=64, radius=12.0, depth=5.0)
+crater    = CraterCandidate(row=32, col=32, radius=12.0,
+                            rim_completeness=1.0, curvature_contrast=1.0)
+tg_rim    = crater_rim_graph(dem_moon, [crater], rim_width=3)
+betti     = crater_betti_numbers(tg_rim)          # {'beta0':1, 'beta1':1, ...}
+null      = abiotic_beta1_craters(n_intact=1)     # {'beta1_abio':1, 'kmin_abio':2}
+bio       = topological_biosignature(betti["beta1"], null["beta1_abio"])
+print(f"Δβ₁ = {bio.delta_beta1}  anomalous: {bio.is_anomalous}")
+
+# ── River channel detection (Mars / Titan) ─────────────────────────────────
+dem_chan  = synthetic_channel_dem(nrows=64, ncols=64, n_tributaries=4)
+dg       = drainage_network_graph(dem_chan, threshold=6)
+budget   = topology_budget(dg)                    # {'beta0':1,'beta1':3,'kmin':4}
+diag     = triple_spectral_diagnostic(dg)         # P2 Proposition 3
+print(f"H={diag.H_spectral:.3f}  E_curl={diag.E_curl:.4f}  β₁={diag.beta1}")
+print(f"Triple diagnostic (channeled?): {diag.is_channeled}")
+
+# ── Topological biosignature detection threshold (P4 Proposition 1) ────────
+thresh = detection_threshold(beta1_abio=2, delta_beta1=1,
+                             bits_per_coeff=32.0, I_self_bps=1e9)
+print(f"Modes needed: {thresh['k_required']}  R_min: {thresh['R_min']:.2e}")
+
+# ── Cross-kernel factorization test (P4 Proposition 2 / Titan/Dragonfly) ──
+K_chem  = np.eye(4)              # marginal chemistry kernel
+K_hydro = np.eye(4)              # marginal hydrology kernel
+K_joint = np.kron(K_chem, K_hydro) + 0.3 * np.ones((16, 16))  # biological coupling
+result  = factorization_test(K_joint, K_chem, K_hydro)
+print(f"Coupled: {result['is_coupled']}  r={result['relative_norm']:.3f}")
+
+# ── Plume spectral entropy biosignature (P4 Proposition 3 / Enceladus) ────
+species = ["H2", "CH4", "CO2", "NH3", "C2H6", "HCN"]
+co = np.array([[0,3,1,0,2,0],[3,0,1,2,0,1],[1,1,0,1,0,0],
+               [0,2,1,0,1,2],[2,0,0,1,0,1],[0,1,0,2,1,0]], dtype=float)
+_, L_chem = chemical_affinity_graph(species, co)
+plume = plume_spectral_entropy(L_chem)
+print(f"Entropy drop: {plume['entropy_drop']:.3f}  "
+      f"Bandpass spike: {plume['bandpass_spike']:.2f}×  "
+      f"Biosignature: {plume['is_biosignature']}")
+
+# ── Spectral kernel diagnostics (P1 / P2) ─────────────────────────────────
+L      = terrain_graph_laplacian(dem_to_graph(dem_chan))
+h0     = np.ones(L.shape[0])
+h_star, info = fixed_point_kernel(L, h0=h0, mu2=2.0, sigma2=1.0,
+                                   w=np.ones(L.shape[0]))
+H = spectral_entropy(h_star)
+print(f"Fixed point converged: {info['converged']}  "
+      f"H[h*]={H:.3f}  ρ={info['contraction_ratio']:.3f}")
+
+# ── Stability–conservation tradeoff (Route 3, P2 Prop 1b) ─────────────────
+sc = stability_conservation_tradeoff(h_star, L, mu2=2.0, sigma2=1.0,
+                                      w=np.ones(L.shape[0]))
+print(f"Conservation holds: {sc['conservation_holds']}  "
+      f"Δ'={sc['Delta_prime']:.3f}  deficit={sc['conservation_deficit']:.3f}")
+
+# ── Observability ratio — which measurement regime? (P2 Table 2) ───────────
+obs = observability_ratio(R_bps=2e5, P_phys_W=1e7, T_K=250.0)  # Mars dust devil
+print(f"log₁₀(R/İself) = {obs['log10_ratio']:.1f}  regime: {obs['regime']}")
+```
 
 ### MaxCal adaptive sampler
 
@@ -593,6 +682,19 @@ run_landauer_server.sh       # One-command: build → run → merge → figure
 | Fluid learning dynamics under MaxCal (§) | `kernelcal.fluid.dynamics` |
 | Bloom field MaxCal rover (§) | `ros2_ws/bloom_maxcal_sim` |
 
+| Stability–conservation tradeoff $D_m = H_{mm} = -\Delta'$ (P2 Prop. 1b) | `kernelcal.terrain.diagnostics.stability_conservation_tradeoff` |
+| Route 3 numerical verification (P2 Exp. 4) | `kernelcal/route3_conservation_test.py`, `tests/test_terrain.py::TestDiagnostics` |
+| Topological Conservation Theorem $k_{\min} = \beta_0 + \beta_1$ (P2 Thm. 1) | `kernelcal.terrain.craters.abiotic_beta1_craters`, `kernelcal.terrain.channels.topology_budget` |
+| Triple spectral diagnostic (P2 Prop. 3) | `kernelcal.terrain.channels.triple_spectral_diagnostic` |
+| Bandwidth-constrained protocol (P2 Alg. 1) | `kernelcal.terrain.diagnostics.bandwidth_optimal_modes` |
+| Observability ratio $R/\dot{I}_{\rm self}$ (P2 Table 2) | `kernelcal.terrain.diagnostics.observability_ratio` |
+| OCN as MaxCal fixed point (P3 Thm. 7.3) | `kernelcal.terrain.channels.drainage_network_graph` |
+| Max-Flow Min-Cut phase transition (P3 Prop. 7.5) | `kernelcal.terrain.diagnostics.phase_transition_sweep` |
+| Topological biosignature $\Delta\beta_1$ (P4 Def. 1) | `kernelcal.terrain.biosig.topological_biosignature` |
+| Detection threshold $R_{\min}$ (P4 Prop. 1) | `kernelcal.terrain.biosig.detection_threshold` |
+| Cross-kernel factorization test (P4 Prop. 2) | `kernelcal.terrain.biosig.factorization_test` |
+| Plume spectral entropy biosignature (P4 Prop. 3) | `kernelcal.terrain.biosig.plume_spectral_entropy` |
+
 *† from the companion spectral paper (in preparation)*
 *‡ from "Decentralised GP Bandits with Dynamic Kernels under MaxCal" (in preparation)*
 *§ from fluid learning manuscript (in preparation)*
@@ -638,4 +740,44 @@ Seven integration threads mapped to DeepGIS-XR components:
   journal = {arXiv preprint arXiv:2603.27880},
   year    = {2026}
 }
+
+@article{das2026planetary,
+  title   = {Spectral Kernel Dynamics for Planetary Twins:
+             Topological Conservation, the Stability--Conservation Tradeoff,
+             and Early Warning from Dust Devils to Rapid Intensification},
+  author  = {Das, Jnaneshwar},
+  note    = {Manuscript, Arizona State University},
+  year    = {2026}
+}
+
+@article{das2026terrestrial,
+  title   = {Spectral Kernel Dynamics for Terrestrial Environmental Networks:
+             Flow Conservation, Biogeomorphic Coupling, and Cyber-Physical Twins},
+  author  = {Das, Jnaneshwar},
+  note    = {Manuscript, Arizona State University},
+  year    = {2026}
+}
+
+@article{das2026biosignature,
+  title   = {Spectral Kernel Dynamics as a Biosignature Framework:
+             Topological Detection of Optimal Controllers on Planetary Surfaces},
+  author  = {Das, Jnaneshwar},
+  note    = {Manuscript, Arizona State University},
+  year    = {2026}
+}
 ```
+
+---
+
+## Changelog
+
+### v0.5.0 (April 2026)
+- **New: `kernelcal.terrain`** — planetary terrain analysis and topological biosignature detection
+  - `dem.py`: DEM → grid graph, D8 flow routing, flow accumulation, slope/curvature, synthetic test fixtures
+  - `craters.py`: Hough-transform crater detection, rim graph, Betti numbers, abiotic null model
+  - `channels.py`: D8 drainage network graphs, Strahler ordering, Hodge decomposition on edge signals, triple spectral diagnostic (P2 Prop. 3), topology budget (kmin)
+  - `biosig.py`: topological biosignature Δβ₁ (P4 Def. 1), detection threshold, cross-kernel factorization test, plume spectral entropy biosignature
+  - `diagnostics.py`: fixed-point kernel, spectral entropy, Fiedler-mode gap, stability–conservation tradeoff (Route 3 / P2 Prop. 1b), phase-transition sweep, observability ratio, bandwidth-optimal mode selection
+  - 66 tests, stdlib-only (numpy + scipy)
+- **Route 3 result** numerically verified and documented: conservation identity D_m = H_mm = −Δ′ for Gaussian MI source on P8 (`kernelcal/route3_conservation_test.py`)
+- Paper series expanded to P1–P4; README and citation block updated
