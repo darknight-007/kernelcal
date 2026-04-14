@@ -739,7 +739,7 @@ Please cite them if you use the corresponding analyses.
 | Dataset | Source | Script(s) | Notes |
 |---|---|---|---|
 | **Robbins (2018/2019) Global Lunar Crater Database** — 1.3 M craters, D ≥ 1 km, LRO WAC / LOLA / SELENE TC | [USGS Astrogeology](https://astrogeology.usgs.gov/search/map/moon_crater_database_v1_robbins) | `robbins_kernelcal.py`, `robbins_paper_figs.py` | k-NN proximity graph; used as methodological null to expose graph-construction invariance |
-| **USGS 3DEP 1 m LiDAR DEM** — Coconino / Oak Creek Canyon, AZ Plateau | [USGS National Map](https://www.usgs.gov/the-national-map-data-delivery) | `badlands_kernelcal.py`, `terrain_channel_graph.py` | Rook-adjacency D8 channel graphs; abiotic null calibration |
+| **USGS 3DEP 1 m LiDAR DEM** — Coconino / Oak Creek Canyon, AZ Plateau *(planned future experiment)* | [USGS National Map](https://www.usgs.gov/the-national-map-data-delivery) | *(script not yet written — see ED0 in P4 §9.1)* | Rook-adjacency D8 channel graph for abiotic null calibration; DEM channel extraction methodology must be validated before scientific use |
 | **MADNet HiRISE DTM mosaic** — Jezero Crater, Mars *(planned future experiment)* | [Tao et al. 2023, *Earth and Space Science*](https://doi.org/10.1029/2022EA002597); [FU Berlin data repository](https://refubium.fu-berlin.de/handle/fub188/41095) | *(script not yet written — see ED2 in P4 §9.1)* | Seam-free 1 m/pixel DTM; required for the Mars delta topology experiment; the HRSC DEM has persistent swath-boundary step edges that cannot be fully removed by post-hoc filtering |
 | **OpenStreetMap street networks** — 5 world cities (Barcelona, Phoenix, Venice, Marrakech, Houston) | [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright), via [OSMnx](https://github.com/gboeing/osmnx) | `osm_street_kernelcal.py` | Physically motivated edges (road segments); intersection nodes |
 | **OpenStreetMap building footprints** — 5 world cities | [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright), via [OSMnx](https://github.com/gboeing/osmnx) | `osm_urban_kernelcal.py` | k-NN proximity graphs on centroids (superseded by street-network analysis) |
@@ -752,9 +752,9 @@ The scripts implement three edge-construction methods with different validity st
 
 | Method | Physical referent | Status |
 |---|---|---|
-| **D8 rook adjacency** (terrain scripts) | Shared pixel boundary = water flows between neighbouring channel cells | ✓ Physically motivated |
-| **OSM road segment** (street scripts) | Built road = an act of construction by a planning controller | ✓ Physically motivated |
-| **k-NN proximity** (urban/crater scripts) | None — analyst-imposed distance threshold | ✗ Graph-construction artifact |
+| **OSM road segment** (`osm_street_kernelcal.py`) | Built road = an act of construction by a planning controller | ✓ Physically motivated — confirmed |
+| **D8 rook adjacency** (planned, see ED0/ED2 in P4) | Shared pixel boundary = water flows between neighbouring channel cells | ✓ Physically motivated — not yet implemented |
+| **k-NN proximity** (`robbins_kernelcal.py`) | None — analyst-imposed distance threshold | ✗ Graph-construction artifact — retained as methodological null |
 
 k-NN graphs on 2,000 points in a bounded domain produce nearly identical spectral signatures regardless of the generative process.
 The Robbins crater analysis (`robbins_kernelcal.py`) explicitly demonstrates this invariance and is retained as a methodological transparency exhibit.
@@ -845,19 +845,25 @@ analysis that uses external data:
 
 ## Changelog
 
+### v0.7.0 (April 2026)
+- **Scope reduced to confirmed systems only** — empirical calibration now contains
+  exactly two script families: OSM city street networks (active controller, confirmed)
+  and Robbins lunar crater k-NN (methodological null, confirmed)
+- **Removed DEM-based terrain scripts** — `terrain_channel_graph.py`, `badlands_kernelcal.py`,
+  `artifact_filter.py`, and `tests/test_artifact_filter.py` deleted; D8 rook-adjacency
+  channel extraction requires careful DEM selection and methodology validation before
+  results are scientifically meaningful; deferred to ED0 in P4 §9.1
+- **Paper (P4) further tightened** — AZ Plateau removed from empirical calibration;
+  the one confirmed tier is the active-controller tier (5 cities); the abiotic and
+  fossil-controller tiers are theoretically predicted; §9.1 now has five numbered
+  experimental designs (ED0–ED4)
+
 ### v0.6.0 (April 2026)
 - **Removed Jezero analysis** — `jezero_rook_kernelcal.py` and `jezero_kernelcal.py` deleted;
-  the HRSC DEM contains persistent swath-seam step edges that survive all post-hoc filtering
-  (E-W median, column-accumulation anomaly masking, N-S flow-direction chain removal, OpenCV
-  Hough line detection); Jezero analysis is deferred to ED2 in the P4 paper pending a
-  seam-free MADNet HiRISE DTM
-- **New: `artifact_filter.py`** — general-purpose DEM artifact detection module extracted from
-  the Jezero pipeline; exports `detect_and_mask_hough_lines` (OpenCV probabilistic Hough
-  transform, configurable angle tolerance, buffer width); 19 unit tests in
-  `tests/test_artifact_filter.py` all pass
-- **Paper (P4) tightened** — Jezero removed from empirical calibration; two confirmed systems
-  remain (AZ Plateau abiotic null, 5-city active controller); §9.1 "Future Experimental
-  Designs" added with four numbered experimental protocols (ED1–ED4)
+  the HRSC DEM contains persistent swath-seam step edges that survive all post-hoc filtering;
+  Jezero analysis deferred to ED2 in P4 §9.1 pending a seam-free MADNet HiRISE DTM
+- **Paper (P4) tightened** — Jezero removed from empirical calibration; §9.1
+  "Future Experimental Designs" added
 
 ### v0.5.1 (April 2026)
 - **Empirical calibration pipeline** — two-system controller hierarchy on real data
