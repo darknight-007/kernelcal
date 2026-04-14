@@ -738,6 +738,7 @@ Please cite them if you use the corresponding analyses.
 
 | Dataset | Source | Script(s) | Notes |
 |---|---|---|---|
+| **Bobcat Fire drone MBTiles** — 4 timestamps, Tonto NF, AZ (Aug–Feb 2020–21) | DeepGIS-XR server (local copy in `datasets/bf_mbtiles/`) | `bf_kernelcal_demo.py`, `bf_kernelcal_plots.py` | Mask R-CNN channel-polygon centroids; k-NN local graph (k=6, σ=8 m); temporal controller-removal experiment; H +0.230 nats, β₁ +52 over 6 months |
 | **Robbins (2018/2019) Global Lunar Crater Database** — 1.3 M craters, D ≥ 1 km, LRO WAC / LOLA / SELENE TC | [USGS Astrogeology](https://astrogeology.usgs.gov/search/map/moon_crater_database_v1_robbins) | `robbins_kernelcal.py`, `robbins_paper_figs.py` | k-NN proximity graph; used as methodological null to expose graph-construction invariance |
 | **USGS 3DEP 1 m LiDAR DEM** — Coconino / Oak Creek Canyon, AZ Plateau *(planned future experiment)* | [USGS National Map](https://www.usgs.gov/the-national-map-data-delivery) | *(script not yet written — see ED0 in P4 §9.1)* | Rook-adjacency D8 channel graph for abiotic null calibration; DEM channel extraction methodology must be validated before scientific use |
 | **MADNet HiRISE DTM mosaic** — Jezero Crater, Mars *(planned future experiment)* | [Tao et al. 2023, *Earth and Space Science*](https://doi.org/10.1029/2022EA002597); [FU Berlin data repository](https://refubium.fu-berlin.de/handle/fub188/41095) | *(script not yet written — see ED2 in P4 §9.1)* | Seam-free 1 m/pixel DTM; required for the Mars delta topology experiment; the HRSC DEM has persistent swath-boundary step edges that cannot be fully removed by post-hoc filtering |
@@ -844,6 +845,20 @@ analysis that uses external data:
 ---
 
 ## Changelog
+
+### v0.8.0 (April 2026)
+- **Bobcat Fire analysis integrated** — `bf_kernelcal_demo.py` and
+  `bf_kernelcal_plots.py` confirmed working on local MBTile data;
+  four timestamps (Aug–Feb 2020–2021) produce a clear temporal signal:
+  H rising +0.230 nats, β₁ growing +52 loops, polygon count +3×;
+  this is the *controller-removal experiment* providing empirical evidence
+  of the abiotic post-fire trajectory
+- **BF figures generated** — `figures/bf_kernelcal_analysis.png`,
+  `figures/bf_temporal_dynamics.png`, `figures/bf_fixedpoint_kernel_evolution.png`,
+  `figures/bf_spectral_weight_distribution.png`
+- **Paper (P4) updated** — BF added to empirical calibration §7.1 alongside
+  cities; the two confirmed systems now bookend the controller hierarchy
+  from both sides (active controller present vs. controller removed)
 
 ### v0.7.0 (April 2026)
 - **Scope reduced to confirmed systems only** — empirical calibration now contains
