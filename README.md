@@ -740,8 +740,7 @@ Please cite them if you use the corresponding analyses.
 |---|---|---|---|
 | **Robbins (2018/2019) Global Lunar Crater Database** — 1.3 M craters, D ≥ 1 km, LRO WAC / LOLA / SELENE TC | [USGS Astrogeology](https://astrogeology.usgs.gov/search/map/moon_crater_database_v1_robbins) | `robbins_kernelcal.py`, `robbins_paper_figs.py` | k-NN proximity graph; used as methodological null to expose graph-construction invariance |
 | **USGS 3DEP 1 m LiDAR DEM** — Coconino / Oak Creek Canyon, AZ Plateau | [USGS National Map](https://www.usgs.gov/the-national-map-data-delivery) | `badlands_kernelcal.py`, `terrain_channel_graph.py` | Rook-adjacency D8 channel graphs; abiotic null calibration |
-| **HRSC 1 m DEM** — Jezero Crater western delta, Mars | [NASA/USGS PDS](https://ode.rsl.wustl.edu/) | `jezero_kernelcal.py`, `jezero_rook_kernelcal.py` | Rook-adjacency D8 channel graphs; swath-boundary artifact (39.3 m step) filtered with E-W directional median before flow accumulation |
-| **MADNet HiRISE DTM mosaic** — Jezero Crater, Mars (recommended replacement) | [Tao et al. 2023, *Earth and Space Science*](https://doi.org/10.1029/2022EA002597); [FU Berlin data repository](https://refubium.fu-berlin.de/handle/fub188/41095) | `jezero_rook_kernelcal.py` (future) | Deep-learning-based DTM with no swath-seam artefacts; 1 m/pixel; covers full Perseverance landing ellipse |
+| **MADNet HiRISE DTM mosaic** — Jezero Crater, Mars *(planned future experiment)* | [Tao et al. 2023, *Earth and Space Science*](https://doi.org/10.1029/2022EA002597); [FU Berlin data repository](https://refubium.fu-berlin.de/handle/fub188/41095) | *(script not yet written — see ED2 in P4 §9.1)* | Seam-free 1 m/pixel DTM; required for the Mars delta topology experiment; the HRSC DEM has persistent swath-boundary step edges that cannot be fully removed by post-hoc filtering |
 | **OpenStreetMap street networks** — 5 world cities (Barcelona, Phoenix, Venice, Marrakech, Houston) | [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright), via [OSMnx](https://github.com/gboeing/osmnx) | `osm_street_kernelcal.py` | Physically motivated edges (road segments); intersection nodes |
 | **OpenStreetMap building footprints** — 5 world cities | [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright), via [OSMnx](https://github.com/gboeing/osmnx) | `osm_urban_kernelcal.py` | k-NN proximity graphs on centroids (superseded by street-network analysis) |
 | **DREAMS-lab LROC NAC MaskRCNN predictions** — highland crater patch | [DREAMS-lab/LROC_NAC_MaskRCNN_Prediction_Pipeline](https://github.com/DREAMS-lab/LROC_NAC_MaskRCNN_Prediction_Pipeline) | `lunar_kernelcal.py` | Results not used in paper; segmentation biased to one side of image |
@@ -846,14 +845,27 @@ analysis that uses external data:
 
 ## Changelog
 
+### v0.6.0 (April 2026)
+- **Removed Jezero analysis** — `jezero_rook_kernelcal.py` and `jezero_kernelcal.py` deleted;
+  the HRSC DEM contains persistent swath-seam step edges that survive all post-hoc filtering
+  (E-W median, column-accumulation anomaly masking, N-S flow-direction chain removal, OpenCV
+  Hough line detection); Jezero analysis is deferred to ED2 in the P4 paper pending a
+  seam-free MADNet HiRISE DTM
+- **New: `artifact_filter.py`** — general-purpose DEM artifact detection module extracted from
+  the Jezero pipeline; exports `detect_and_mask_hough_lines` (OpenCV probabilistic Hough
+  transform, configurable angle tolerance, buffer width); 19 unit tests in
+  `tests/test_artifact_filter.py` all pass
+- **Paper (P4) tightened** — Jezero removed from empirical calibration; two confirmed systems
+  remain (AZ Plateau abiotic null, 5-city active controller); §9.1 "Future Experimental
+  Designs" added with four numbered experimental protocols (ED1–ED4)
+
 ### v0.5.1 (April 2026)
-- **Empirical calibration pipeline** — three-system controller hierarchy on real data
+- **Empirical calibration pipeline** — two-system controller hierarchy on real data
   - `terrain_channel_graph.py`: rook/queen adjacency terrain graphs on AZ Plateau USGS 3DEP DEM; visual verification of physically motivated edges vs. k-NN artifacts; AZ abiotic null: ΔH = −0.027, β₁ = 3
-  - `jezero_rook_kernelcal.py`: Jezero Crater rook-adjacency analysis with **swath-artifact filtering**: E-W directional median DEM pre-filter + near-vertical chain removal; parameter sweep (4 thresholds × 4 N values); LCC analysis; component size distribution; ΔH = −0.27 ± 0.03 nats (robust), β₁ unstable (0–16 range), LCC = 11 nodes
   - `osm_street_kernelcal.py`: OSM road-network graphs for 5 cities; physically motivated edges (road segments); spatial-patch bootstrap (N=300, 100 iterations); ΔH ∈ [−0.34, −0.24], Δβ₁/N ∈ [0.19, 0.61]
   - `robbins_kernelcal.py`, `robbins_paper_figs.py`: Robbins global lunar crater k-NN analysis retained as **methodological null** demonstrating graph-construction invariance; 5 regional sub-samples are spectrally identical despite geological diversity
 - **Graph construction methodology** — documented physical vs. artifact edges; k-NN proximity graphs diagnosed as graph-construction artifacts for all point-cloud inputs
-- **New data acknowledgements**: MADNet HiRISE DTM (Tao et al. 2023) cited as recommended DEM for Jezero reanalysis; OSM street networks added; graph provenance table added to README
+- **New data acknowledgements**: MADNet HiRISE DTM (Tao et al. 2023) cited as planned future dataset; OSM street networks added; graph provenance table added to README
 - **Field notes 38–41** document the full methodology pivot and results
 
 ### v0.5.0 (April 2026)
