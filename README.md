@@ -731,31 +731,58 @@ Seven integration threads mapped to DeepGIS-XR components:
 
 ---
 
+## External datasets used in demonstrations
+
+The scripts in this repository use the following publicly available datasets.
+Please cite them if you use the corresponding analyses.
+
+| Dataset | Source | Script(s) | Notes |
+|---|---|---|---|
+| **Robbins (2018/2019) Global Lunar Crater Database** — 1.3 M craters, D ≥ 1 km, LRO WAC / LOLA / SELENE TC | [USGS Astrogeology](https://astrogeology.usgs.gov/search/map/moon_crater_database_v1_robbins) | `robbins_kernelcal.py`, `robbins_paper_figs.py` | k-NN proximity graph; used as methodological null to expose graph-construction invariance |
+| **USGS 3DEP 1 m LiDAR DEM** — Coconino / Oak Creek Canyon, AZ Plateau | [USGS National Map](https://www.usgs.gov/the-national-map-data-delivery) | `badlands_kernelcal.py`, `terrain_channel_graph.py` | Rook-adjacency D8 channel graphs; abiotic null calibration |
+| **HRSC 1 m DEM** — Jezero Crater western delta, Mars | [NASA/USGS PDS](https://ode.rsl.wustl.edu/) | `jezero_kernelcal.py`, `jezero_rook_kernelcal.py` | Rook-adjacency D8 channel graphs; swath-boundary artifact (39.3 m step) filtered with E-W directional median before flow accumulation |
+| **MADNet HiRISE DTM mosaic** — Jezero Crater, Mars (recommended replacement) | [Tao et al. 2023, *Earth and Space Science*](https://doi.org/10.1029/2022EA002597); [FU Berlin data repository](https://refubium.fu-berlin.de/handle/fub188/41095) | `jezero_rook_kernelcal.py` (future) | Deep-learning-based DTM with no swath-seam artefacts; 1 m/pixel; covers full Perseverance landing ellipse |
+| **OpenStreetMap street networks** — 5 world cities (Barcelona, Phoenix, Venice, Marrakech, Houston) | [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright), via [OSMnx](https://github.com/gboeing/osmnx) | `osm_street_kernelcal.py` | Physically motivated edges (road segments); intersection nodes |
+| **OpenStreetMap building footprints** — 5 world cities | [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright), via [OSMnx](https://github.com/gboeing/osmnx) | `osm_urban_kernelcal.py` | k-NN proximity graphs on centroids (superseded by street-network analysis) |
+| **DREAMS-lab LROC NAC MaskRCNN predictions** — highland crater patch | [DREAMS-lab/LROC_NAC_MaskRCNN_Prediction_Pipeline](https://github.com/DREAMS-lab/LROC_NAC_MaskRCNN_Prediction_Pipeline) | `lunar_kernelcal.py` | Results not used in paper; segmentation biased to one side of image |
+
+### Graph construction provenance
+
+Every edge in a calibration graph must have a physical referent.
+The scripts implement three edge-construction methods with different validity status:
+
+| Method | Physical referent | Status |
+|---|---|---|
+| **D8 rook adjacency** (terrain scripts) | Shared pixel boundary = water flows between neighbouring channel cells | ✓ Physically motivated |
+| **OSM road segment** (street scripts) | Built road = an act of construction by a planning controller | ✓ Physically motivated |
+| **k-NN proximity** (urban/crater scripts) | None — analyst-imposed distance threshold | ✗ Graph-construction artifact |
+
+k-NN graphs on 2,000 points in a bounded domain produce nearly identical spectral signatures regardless of the generative process.
+The Robbins crater analysis (`robbins_kernelcal.py`) explicitly demonstrates this invariance and is retained as a methodological transparency exhibit.
+
+---
+
 ## Citation
+
+Cite the primary paper for the framework, the dataset paper(s) for any
+analysis that uses external data:
 
 ```bibtex
 @article{das2026kerneldynamics,
   title   = {Kernel Dynamics under Path Entropy Maximization},
   author  = {Das, Jnaneshwar},
   journal = {arXiv preprint arXiv:2603.27880},
-  year    = {2026}
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2603.27880}
 }
 
-@article{das2026planetary,
-  title   = {Spectral Kernel Dynamics for Planetary Twins:
-             Topological Conservation, the Stability--Conservation Tradeoff,
-             and Early Warning from Dust Devils to Rapid Intensification},
+@article{das2026maxcal,
+  title   = {Spectral Kernel Dynamics via Maximum Caliber:
+             Fixed Points, Geodesics, and Phase Transitions},
   author  = {Das, Jnaneshwar},
-  note    = {Manuscript, Arizona State University},
-  year    = {2026}
-}
-
-@article{das2026terrestrial,
-  title   = {Spectral Kernel Dynamics for Terrestrial Environmental Networks:
-             Flow Conservation, Biogeomorphic Coupling, and Cyber-Physical Twins},
-  author  = {Das, Jnaneshwar},
-  note    = {Manuscript, Arizona State University},
-  year    = {2026}
+  journal = {arXiv preprint arXiv:2604.09745},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2604.09745}
 }
 
 @article{das2026biosignature,
@@ -765,11 +792,69 @@ Seven integration threads mapped to DeepGIS-XR components:
   note    = {Manuscript, Arizona State University},
   year    = {2026}
 }
+
+%% ── External datasets ────────────────────────────────────────────────────
+
+@article{robbins2019,
+  title   = {A new global database of lunar impact craters $>$1--2~km:
+             1.~Crater locations and sizes, comparisons with published
+             databases, and global analysis},
+  author  = {Robbins, Stuart J.},
+  journal = {Journal of Geophysical Research: Planets},
+  volume  = {124},
+  number  = {4},
+  pages   = {871--892},
+  year    = {2019},
+  doi     = {10.1029/2018JE005592}
+}
+
+@misc{robbins2018db,
+  title        = {Moon Crater Database v1 Robbins},
+  author       = {Robbins, Stuart J.},
+  howpublished = {USGS Astrogeology Science Center},
+  year         = {2018},
+  note         = {Published 2018-08-15},
+  url          = {https://astrogeology.usgs.gov/search/map/moon_crater_database_v1_robbins}
+}
+
+@software{boeing2017osmnx,
+  title   = {{OSMnx}: New methods for acquiring, constructing, analysing,
+             and visualising complex street networks},
+  author  = {Boeing, Geoff},
+  journal = {Computers, Environment and Urban Systems},
+  volume  = {65},
+  pages   = {126--139},
+  year    = {2017},
+  doi     = {10.1016/j.compenvurbsys.2017.05.004}
+}
+
+@article{tao2023madnet,
+  title   = {A high-resolution digital terrain model mosaic of the Mars~2020
+             {Perseverance} rover landing site, {Jezero} Crater, Mars, from
+             {MADNet} deep-learning-based multi-view stereo surface modelling},
+  author  = {Tao, Yu and Muller, Jan-Peter and Conway, Susan~J. and
+             Putri, Alfiah~R.~D.},
+  journal = {Earth and Space Science},
+  volume  = {10},
+  pages   = {e2022EA002597},
+  year    = {2023},
+  doi     = {10.1029/2022EA002597}
+}
 ```
 
 ---
 
 ## Changelog
+
+### v0.5.1 (April 2026)
+- **Empirical calibration pipeline** — three-system controller hierarchy on real data
+  - `terrain_channel_graph.py`: rook/queen adjacency terrain graphs on AZ Plateau USGS 3DEP DEM; visual verification of physically motivated edges vs. k-NN artifacts; AZ abiotic null: ΔH = −0.027, β₁ = 3
+  - `jezero_rook_kernelcal.py`: Jezero Crater rook-adjacency analysis with **swath-artifact filtering**: E-W directional median DEM pre-filter + near-vertical chain removal; parameter sweep (4 thresholds × 4 N values); LCC analysis; component size distribution; ΔH = −0.27 ± 0.03 nats (robust), β₁ unstable (0–16 range), LCC = 11 nodes
+  - `osm_street_kernelcal.py`: OSM road-network graphs for 5 cities; physically motivated edges (road segments); spatial-patch bootstrap (N=300, 100 iterations); ΔH ∈ [−0.34, −0.24], Δβ₁/N ∈ [0.19, 0.61]
+  - `robbins_kernelcal.py`, `robbins_paper_figs.py`: Robbins global lunar crater k-NN analysis retained as **methodological null** demonstrating graph-construction invariance; 5 regional sub-samples are spectrally identical despite geological diversity
+- **Graph construction methodology** — documented physical vs. artifact edges; k-NN proximity graphs diagnosed as graph-construction artifacts for all point-cloud inputs
+- **New data acknowledgements**: MADNet HiRISE DTM (Tao et al. 2023) cited as recommended DEM for Jezero reanalysis; OSM street networks added; graph provenance table added to README
+- **Field notes 38–41** document the full methodology pivot and results
 
 ### v0.5.0 (April 2026)
 - **New: `kernelcal.terrain`** — planetary terrain analysis and topological biosignature detection
