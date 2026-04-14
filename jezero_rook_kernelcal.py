@@ -71,9 +71,10 @@ MU2            = 2.0
 SIGMA2         = 1.0
 
 # Artifact filter parameters
-EW_FILTER_WIDTH = 9         # E-W median kernel width (pixels) to suppress step edges
-ARTIFACT_COL_STD_MAX = 2.0  # max column std-dev (pixels) → near-vertical chain
-ARTIFACT_MIN_SIZE    = 12   # min chain length to flag as artifact
+EW_FILTER_WIDTH      = 21   # E-W median kernel width (pixels) — wider suppresses deeper steps
+ARTIFACT_COL_STD_MAX = 4.0  # max column std-dev (pixels) → near-vertical chain (relaxed)
+ARTIFACT_MIN_SIZE    = 8    # min chain length to flag as artifact (relaxed)
+COL_ACC_NSIGMA       = 2.5  # column-accumulation z-score threshold for seam detection
 
 plt.rcParams.update({
     'font.family': 'sans-serif', 'font.sans-serif': ['DejaVu Sans'],
@@ -127,24 +128,113 @@ def prefilter_swath_artifacts(dem: np.ndarray,
                               ew_width: int = EW_FILTER_WIDTH) -> np.ndarray:
     """E-W directional median filter to suppress N-S swath-boundary step edges.
 
-    HRSC/HiRISE DEMs mosaicked from push-broom strips often have 1–10 m height
-    offsets at swath seams.  These seams run N-S (along-track).  D8 routing
-    interprets the step as a valley → all pixels drain toward the seam →
-    artificial high-accumulation line running N-S.
-
-    A 1 × ew_width median filter blurs the step in the cross-track (E-W)
-    direction while largely preserving real N-S channel walls (which are
-    narrow relative to the filter width).
+    Width of 21 pixels = 420 m cross-track — wide enough to span the full
+    transition zone of a typical HRSC swath seam (step spreads over ~200 m).
+    Applied twice to handle asymmetric or multi-step seams.
     """
     valid    = np.isfinite(dem)
     fill_val = float(np.nanmedian(dem))
     dem_fill = np.where(valid, dem, fill_val)
-    dem_smooth = ndimage_median_filter(dem_fill, size=(1, ew_width))
-    dem_filtered = np.where(valid, dem_smooth, np.nan)
-    # Compute max step removed
+    # Two passes: first broad, then tighten to preserve narrow channels
+    dem_s1 = ndimage_median_filter(dem_fill, size=(1, ew_width))
+    dem_s2 = ndimage_median_filter(dem_s1,   size=(1, ew_width // 2 + 1))
+    dem_filtered = np.where(valid, dem_s2, np.nan)
     diff = np.nanmax(np.abs(dem - dem_filtered))
-    print(f'  E-W median filter (width={ew_width}): max step suppressed = {diff:.1f} m')
+    print(f'  E-W median filter (width={ew_width}×2 passes): '
+          f'max step suppressed = {diff:.1f} m')
     return dem_filtered
+
+
+def mask_seam_columns(acc: np.ndarray, dem: np.ndarray,
+                      n_sigma: float = COL_ACC_NSIGMA) -> np.ndarray:
+    """Detect and mask columns with anomalously high flow accumulation.
+
+    A N-S swath seam concentrates all adjacent runoff into one or two columns.
+    The column-sum of the flow-accumulation map has a strong spike at seam
+    columns that is clearly anomalous relative to the background.
+
+    Returns a boolean mask (same shape as acc) — True where pixels are KEPT
+    (i.e. NOT part of a seam column).
+    """
+    col_sum = acc.sum(axis=0).astype(float)
+    mu  = float(np.mean(col_sum))
+    sig = float(np.std(col_sum))
+    seam_cols = np.where(col_sum > mu + n_sigma * sig)[0]
+
+    if len(seam_cols) == 0:
+        print(f'  Column-accumulation filter: no anomalous columns detected '
+              f'(threshold = {mu + n_sigma*sig:.0f})')
+        return np.ones(acc.shape, dtype=bool)
+
+    # Dilate by 1 column on each side (seam influence extends ~1 cell)
+    all_seam_cols = set()
+    for c in seam_cols:
+        for dc in range(-1, 2):
+            if 0 <= c + dc < acc.shape[1]:
+                all_seam_cols.add(c + dc)
+
+    keep = np.ones(acc.shape, dtype=bool)
+    for c in all_seam_cols:
+        keep[:, c] = False
+
+    pct_masked = 100.0 * len(all_seam_cols) / acc.shape[1]
+    print(f'  Column-accumulation filter: {len(seam_cols)} seam column(s) '
+          f'(+ {len(all_seam_cols)-len(seam_cols)} dilation) masked '
+          f'[{pct_masked:.1f}% of columns, z > {n_sigma}σ]')
+    return keep
+
+
+def mask_ns_flow_chains(fdir: np.ndarray, acc: np.ndarray,
+                        acc_thr_factor: float = 0.0001,
+                        min_run_len: int = 8) -> np.ndarray:
+    """Remove high-accumulation pixels whose D8 flow direction is purely N or S.
+
+    A swath-seam 'channel' is formed when runoff from both sides drains
+    along the seam axis.  Every pixel in such a chain has D8 flow direction
+    = N (index 1) or S (index 6) for many consecutive cells.  Real dendritic
+    channels have mixed flow directions along their length.
+
+    Finds connected runs of N/S-flowing high-accumulation pixels of length
+    ≥ min_run_len and masks them.
+
+    Returns keep mask (True = NOT an N-S artifact run).
+    """
+    rows, cols = fdir.shape
+    ns_mask = ((fdir == 1) | (fdir == 6))           # pure N or S flow direction
+    high_acc = acc >= max(int(acc_thr_factor * acc.max()), 5)
+    candidate = ns_mask & high_acc
+
+    # BFS / connected-component on candidate pixels (4-connected)
+    visited = np.zeros((rows, cols), dtype=bool)
+    artifact = np.zeros((rows, cols), dtype=bool)
+    n_chains = 0
+
+    for r0 in range(rows):
+        for c0 in range(cols):
+            if candidate[r0, c0] and not visited[r0, c0]:
+                # BFS
+                comp = []
+                q = deque([(r0, c0)])
+                visited[r0, c0] = True
+                while q:
+                    r, c = q.popleft()
+                    comp.append((r, c))
+                    for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+                        nr, nc = r+dr, c+dc
+                        if (0 <= nr < rows and 0 <= nc < cols
+                                and candidate[nr, nc]
+                                and not visited[nr, nc]):
+                            visited[nr, nc] = True
+                            q.append((nr, nc))
+                if len(comp) >= min_run_len:
+                    for r, c in comp:
+                        artifact[r, c] = True
+                    n_chains += 1
+
+    n_masked = int(artifact.sum())
+    print(f'  N-S flow-direction filter: {n_chains} pure-N/S chains, '
+          f'{n_masked} pixels masked (min_run={min_run_len})')
+    return ~artifact
 
 
 def _find_components(n: int, edges: list[tuple[int, int]]) -> list[np.ndarray]:
@@ -716,8 +806,6 @@ def fig6_component_dist(comp_dist):
 
 def fig7_parameter_sweep(sweep_rows, gd_full, gd_lcc):
     """β₁ and ΔH heatmaps over accumulation threshold × N."""
-    import pandas as pd  # only used for pivoting
-
     fracs = sorted(set(r['frac'] for r in sweep_rows))
     ns    = sorted(set(r['n_max'] for r in sweep_rows))
 
@@ -886,18 +974,31 @@ def main():
     dem_filt = prefilter_swath_artifacts(dem, ew_width=EW_FILTER_WIDTH)
 
     # ── 3. D8 on raw (for comparison) and filtered DEM ────────────────────
-    print('\n[3] D8 flow accumulation (filtered DEM) …')
+    print('\n[3] D8 flow accumulation (raw DEM, for comparison) …')
+    fdir_raw  = d8_flow_dir(dem)
+    acc_raw   = flow_accum(fdir_raw)
+    mask_raw  = channel_mask(acc_raw,  dem,      ACC_THR_FACTOR)
+    print(f'  Raw channel pixels:      {mask_raw.sum():,}')
+
+    print('\n    D8 flow accumulation (E-W filtered DEM) …')
     fdir_filt = d8_flow_dir(dem_filt)
     acc_filt  = flow_accum(fdir_filt)
 
-    print('    D8 flow accumulation (raw DEM, for comparison) …')
-    fdir_raw  = d8_flow_dir(dem)
-    acc_raw   = flow_accum(fdir_raw)
+    # Layer 2: column-accumulation anomaly masking (seam columns)
+    print('\n[3b] Column-accumulation seam masking …')
+    col_keep  = mask_seam_columns(acc_filt, dem_filt, n_sigma=COL_ACC_NSIGMA)
 
-    mask_raw  = channel_mask(acc_raw,  dem,      ACC_THR_FACTOR)
-    mask_filt = channel_mask(acc_filt, dem_filt, ACC_THR_FACTOR)
-    print(f'  Raw channel pixels:      {mask_raw.sum():,}')
-    print(f'  Filtered channel pixels: {mask_filt.sum():,}')
+    # Layer 3: N-S flow-direction chain masking
+    print('\n[3c] N-S flow-direction chain masking …')
+    ns_keep   = mask_ns_flow_chains(fdir_filt, acc_filt,
+                                    acc_thr_factor=ACC_THR_FACTOR,
+                                    min_run_len=8)
+
+    # Combine all masks
+    mask_filt = (channel_mask(acc_filt, dem_filt, ACC_THR_FACTOR)
+                 & col_keep & ns_keep)
+    print(f'  Filtered channel pixels: {mask_filt.sum():,} '
+          f'(after DEM filter + col-anomaly + N-S chain removal)')
 
     # ── 4. Extract nodes from filtered DEM ────────────────────────────────
     print('\n[4] Extract channel nodes (filtered DEM) …')
