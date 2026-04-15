@@ -4,6 +4,7 @@
 
 [![arXiv P1](https://img.shields.io/badge/arXiv-2603.27880-b31b1b.svg)](https://arxiv.org/abs/2603.27880)
 [![arXiv spectral](https://img.shields.io/badge/arXiv-2604.09745-b31b1b.svg)](https://arxiv.org/abs/2604.09745)
+[![CI](https://github.com/darknight-007/kernelcal/actions/workflows/python-tests.yml/badge.svg)](https://github.com/darknight-007/kernelcal/actions/workflows/python-tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
@@ -50,6 +51,13 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.bandits` | **Decentralised Dynamic-Kernel GP-UCB (DDK-GPUCB):** spatiotemporal bandit simulation with learnable mixture kernels, gossip consensus, and Chebyshev-accelerated mixing |
 | `kernelcal.geo3d` | **Spectral compression for 3D geometry:** point clouds, triangle meshes (DAE/OBJ), and temporal LiDAR sequences. Hodge Laplacian complex (L₀/L₁/L₂), persistent homology (0D/1D), compression ratio bounds, Nyström large-mesh path. **`score_compression()`** self-introspection: four-channel quality report (geometry / spectral / kernel / topology) with composite loss and grade |
 | `kernelcal.terrain` | **Planetary terrain analysis and topological biosignature detection** (P2, P3, P4). DEM→graph pipeline (D8 flow routing, slope/curvature), crater rim detection and Betti numbers, drainage network graphs (Strahler ordering, max-flow/min-cut), the triple spectral diagnostic for channel detection (Proposition 3, P2), topological biosignature Δβ₁, cross-kernel factorization test, plume spectral entropy biosignature, fixed-point kernel, stability–conservation tradeoff (Route 3), bandwidth-optimal mode selection, observability ratio. **66 tests, stdlib-only (numpy + scipy).** |
+
+### Reviewer entry points
+
+- **P2–P4 reviewers:** start with `kernelcal.terrain` and `tests/test_terrain.py`.
+  This path is stdlib + `numpy/scipy` and is the most review-ready module.
+- **Core API users:** prefer `kernelcal.core` for stable access to
+  `FixedPointDetector`, `KernelTrajectory`, and `MaxCalSampler`.
 
 ---
 

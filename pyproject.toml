@@ -40,9 +40,10 @@ geo3d        = ["trimesh>=4.0", "pycollada>=0.9"]
 dev          = ["pytest>=7.0", "torch>=2.0", "transformers>=4.35", "matplotlib>=3.7", "pillow>=10.0"]
 
 [project.urls]
-Homepage   = "https://github.com/darknight-007/kernelcal"
-Paper      = "https://arxiv.org/abs/2603.27880"
-DeepGIS    = "https://github.com/Earth-Innovation-Hub/deepgis-xr"
+Homepage              = "https://github.com/darknight-007/kernelcal"
+Paper                 = "https://arxiv.org/abs/2603.27880"
+SpectralKernelDynamics = "https://arxiv.org/abs/2604.09745"
+DeepGIS               = "https://github.com/Earth-Innovation-Hub/deepgis-xr"
 
 [tool.setuptools.packages.find]
 include = ["kernelcal*", "deepgis_kernelcal*"]
