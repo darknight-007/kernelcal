@@ -2,26 +2,30 @@
 
 **Kernel dynamics under Maximum Caliber — variational tools for representational change, thermodynamic bounds, and adaptive sampling.**
 
-[![arXiv](https://img.shields.io/badge/arXiv-2603.27880-b31b1b.svg)](https://arxiv.org/abs/2603.27880)
+[![arXiv P1](https://img.shields.io/badge/arXiv-2603.27880-b31b1b.svg)](https://arxiv.org/abs/2603.27880)
+[![arXiv spectral](https://img.shields.io/badge/arXiv-2604.09745-b31b1b.svg)](https://arxiv.org/abs/2604.09745)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
 > **Status:** research companion library, v0.5.0 — pre-publication, API subject to change.
 
-Companion library to the **four-paper kernel dynamics series**:
+Companion library to the **kernel dynamics paper series** (foundations and graph-spectral theory on arXiv; application manuscripts P2–P4 in preparation):
 
-> **P1 — Kernel Dynamics under Path Entropy Maximization**
-> Jnaneshwar Das — ASU School of Earth and Space Exploration
+> **P1 — Kernel Dynamics under Path Entropy Maximization**  
+> Jnaneshwar Das — ASU School of Earth and Space Exploration  
 > [arXiv:2603.27880](https://arxiv.org/abs/2603.27880)
 >
-> **P2 — Spectral Kernel Dynamics for Planetary Twins**
-> Topological Conservation, the Stability–Conservation Tradeoff, and Early Warning from Dust Devils to Rapid Intensification
+> **Spectral Kernel Dynamics via Maximum Caliber: Fixed Points, Geodesics, and Phase Transitions** — graph Laplacian eigenbasis, MaxCal stationarity for the spectral transfer `h(λ)`, numerical verification on path graph `P_8` with `kernelcal`  
+> [arXiv:2604.09745](https://arxiv.org/abs/2604.09745)
 >
-> **P3 — Spectral Kernel Dynamics for Terrestrial Environmental Networks**
-> Flow Conservation, Biogeomorphic Coupling, and Cyber-Physical Twins
+> **P2 — Spectral Kernel Dynamics for Planetary Twins**  
+> Topological Conservation, the Stability–Conservation Tradeoff, and Early Warning from Dust Devils to Rapid Intensification — **(in preparation)**
 >
-> **P4 — Spectral Kernel Dynamics as a Biosignature Framework**
-> Topological Detection of Optimal Controllers on Planetary Surfaces
+> **P3 — Spectral Kernel Dynamics for Terrestrial Environmental Networks**  
+> Flow Conservation, Biogeomorphic Coupling, and Cyber-Physical Twins — **(in preparation)**
+>
+> **P4 — Spectral Kernel Dynamics as a Biosignature Framework**  
+> Topological Detection of Optimal Controllers on Planetary Surfaces — **(in preparation)**
 
 Integration reference for [DeepGIS-XR](https://github.com/Earth-Innovation-Hub/deepgis-xr), an AI-powered geospatial platform.
 
@@ -776,8 +780,7 @@ The Robbins crater analysis (`robbins_kernelcal.py`) explicitly demonstrates thi
 
 ## Citation
 
-Cite the primary paper for the framework, the dataset paper(s) for any
-analysis that uses external data:
+Cite the arXiv papers for the framework, **in preparation** manuscripts when citing P2–P4 material, and the dataset paper(s) for any analysis that uses external data:
 
 ```bibtex
 @article{das2026kerneldynamics,
@@ -797,12 +800,29 @@ analysis that uses external data:
   url     = {https://arxiv.org/abs/2604.09745}
 }
 
-@article{das2026biosignature,
-  title   = {Spectral Kernel Dynamics as a Biosignature Framework:
-             Topological Detection of Optimal Controllers on Planetary Surfaces},
-  author  = {Das, Jnaneshwar},
-  note    = {Manuscript, Arizona State University},
-  year    = {2026}
+@unpublished{das2026planetarytwins,
+  title  = {Spectral Kernel Dynamics for Planetary Twins:
+            Topological Conservation, the Stability--Conservation Tradeoff,
+            and Early Warning from Dust Devils to Rapid Intensification},
+  author = {Das, Jnaneshwar},
+  note   = {in preparation},
+  year   = {2026}
+}
+
+@unpublished{das2026terrestrial,
+  title  = {Spectral Kernel Dynamics for Terrestrial Environmental Networks:
+            Flow Conservation, Biogeomorphic Coupling, and Cyber-Physical Twins},
+  author = {Das, Jnaneshwar},
+  note   = {in preparation},
+  year   = {2026}
+}
+
+@unpublished{das2026biosignature,
+  title  = {Spectral Kernel Dynamics as a Biosignature Framework:
+            Topological Detection of Optimal Controllers on Planetary Surfaces},
+  author = {Das, Jnaneshwar},
+  note   = {in preparation},
+  year   = {2026}
 }
 
 %% ── External datasets ────────────────────────────────────────────────────
