@@ -45,7 +45,7 @@ Paper      = "https://arxiv.org/abs/2603.27880"
 DeepGIS    = "https://github.com/Earth-Innovation-Hub/deepgis-xr"
 
 [tool.setuptools.packages.find]
-include = ["kernelcal*"]
+include = ["kernelcal*", "deepgis_kernelcal*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -63,6 +63,18 @@ PyTorch is optional — required only for `kernelcal.ntk.compute_empirical_ntk` 
 pip install -e ".[torch]"
 ```
 
+Optional extras for 3D mesh / DAE tooling: `pip install -e ".[geo3d]"`.
+
+### Legacy `deepgis_kernelcal` imports
+
+The former standalone `deepgis-kernelcal` helper package now ships inside this tree. After `pip install -e .`, the old import path still resolves (re-exporting `kernelcal.geo3d`):
+
+```python
+from deepgis_kernelcal import compress_point_cloud, decompress_to_kernel
+```
+
+New code should import from `kernelcal.geo3d` directly.
+
 ---
 
 ## Quick start

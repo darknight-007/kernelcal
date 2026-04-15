@@ -1,4 +1,11 @@
 __pycache__/
+.pytest_cache/
+
+# Local experiment data (large; not for git — use README pointers or LFS if needed)
+cache/
+datasets/
+urban_cache/
+
 *.py[cod]
 *.pyo
 *.pyd
