@@ -57,6 +57,18 @@ from .diagnostics import (spectral_entropy, spectral_entropy_from_laplacian,
                            phase_transition_sweep, observability_ratio,
                            bandwidth_optimal_modes,
                            PhaseSweepResult)
+from .a2_counterexample import (
+    A2CaseResult,
+    A2CounterexampleResult,
+    A2SweepPoint,
+    A2SweepResult,
+    run_worked_a2_counterexample,
+    run_a2_cycle_ratio_sweep,
+    write_a2_sweep_json,
+    write_a2_sweep_csv,
+    rho_with_augmentation,
+    fit_bound_constants,
+)
 
 # Convenience alias: dem_to_flow_graph may not exist yet; guard gracefully
 try:
@@ -96,4 +108,11 @@ __all__ = [
     "stability_conservation_tradeoff",
     "phase_transition_sweep", "observability_ratio",
     "bandwidth_optimal_modes", "PhaseSweepResult",
+    # A2 worked simulation
+    "A2CaseResult", "A2CounterexampleResult",
+    "run_worked_a2_counterexample",
+    "A2SweepPoint", "A2SweepResult",
+    "run_a2_cycle_ratio_sweep",
+    "write_a2_sweep_json", "write_a2_sweep_csv",
+    "rho_with_augmentation", "fit_bound_constants",
 ]

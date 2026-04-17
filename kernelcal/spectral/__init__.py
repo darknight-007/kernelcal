@@ -31,7 +31,7 @@ Quick-start
 """
 
 from .graph import SpectralGraph
-from .source import GaussianMISource, CoupledGaussianMISource
+from .source import GaussianMISource, CoupledGaussianMISource, CowanFarquharSource
 from .procedural import (
     ProceduralSpectralDiagnostics,
     procedural_graph_spectral_diagnostics,
@@ -88,6 +88,7 @@ __all__ = [
     "SpectralGraph",
     "GaussianMISource",
     "CoupledGaussianMISource",
+    "CowanFarquharSource",
     "ProceduralSpectralDiagnostics",
     "SpectralKernelDynamics",
     # result dataclasses

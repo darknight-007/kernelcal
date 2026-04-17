@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
-> **Status:** research companion library, v0.9.0 — pre-publication, API subject to change.
+> **Status:** research companion library, v0.9.2 — pre-publication, API subject to change.
 
 Companion library to the **kernel dynamics paper series** (foundations and graph-spectral theory on arXiv; application manuscripts P2–P4 in preparation):
 
@@ -45,7 +45,8 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.thermodynamics` | Landauer bound $\delta W \geq k_B T \, \delta I_k$, GPU power logging |
 | `kernelcal.models` | MaxCal multi-model selector (SAM / YOLOv8 / Grounding DINO / ...) |
 | `kernelcal.prompts` | Self-consistent Grounding DINO prompt iteration |
-| `kernelcal.spectral` | Spectral kernel dynamics on finite graphs: fixed points, geodesics, stability, phase-transition diagnostics |
+| `kernelcal.spectral` | Spectral kernel dynamics on finite graphs: fixed points, geodesics, stability, phase-transition diagnostics; source functionals `GaussianMISource`, `CoupledGaussianMISource`, and **`CowanFarquharSource`** (Cowan–Farquhar-motivated plant-phenotyping source calibrated so the Riccati p_m = 2 conjecture holds at the target fixed point) |
+| `kernelcal.control` | **CARE (Continuous Algebraic Riccati Equation) solvers** for MaxCal-optimal controller identification in log-coordinates: `fit_riccati_analytic`, `fit_riccati_residual`, `estimate_A_log_OU` (OU mean-reversion from kernel trajectories), `ard_to_observation_matrix` (GP ARD → C_obs), off-diagonal Frobenius / coupling-entropy biosignature, Landauer R lower bound, and the end-to-end `PlantPhenotypingCAREAnalyzer`. Maps to plant-phenotyping manuscript §IV-J and spectral-kernel-dynamics open problem Q12. |
 | `kernelcal.attention` | MaxCal diagnostics on transformer attention kernels: GPT-2 probing, toy training, Landauer bound, perturbation-relaxation, grokking phase detection |
 | `kernelcal.fluid` | Fluid learning dynamics under MaxCal; kernel-trajectory experiments for flow-based systems |
 | `kernelcal.bandits` | **Decentralised Dynamic-Kernel GP-UCB (DDK-GPUCB):** spatiotemporal bandit simulation with learnable mixture kernels, gossip consensus, and Chebyshev-accelerated mixing |
@@ -855,10 +856,15 @@ run_landauer_server.sh       # One-command: build → run → merge → figure
 | Q10 terrain-to-path-space mapping (Bhattacharya & Ghrist 2017) | `kernelcal/blender/q10_pipeline.py::terrain_to_path_space_mapping` |
 | ROS2 digital twin subscriber / RViz publisher | `ros2_ws/.../digital_twin_node.py` |
 | Stability–conservation tradeoff $D_m = H_{mm} = -\Delta'$ (P2 Prop. 1b) | `kernelcal.terrain.diagnostics.stability_conservation_tradeoff` |
-| Route 3 numerical verification (P2 Exp. 4) | `kernelcal/route3_conservation_test.py`, `tests/test_terrain.py::TestDiagnostics` |
+| Route 3 numerical verification (P2 Exp. 4) | `route3_conservation_test.py`, `tests/test_terrain.py::TestDiagnostics` |
 | Topological Conservation Theorem $k_{\min} = \beta_0 + \beta_1$ (P2 Thm. 1) | `kernelcal.terrain.craters.abiotic_beta1_craters`, `kernelcal.terrain.channels.topology_budget` |
 | Triple spectral diagnostic (P2 Prop. 3) | `kernelcal.terrain.channels.triple_spectral_diagnostic` |
 | Critical-node fragmentation and group-betweenness diagnostics (P3/H2) | `kernelcal.terrain.channels.identify_critical_nodes`, `kernelcal.terrain.channels.critical_fragmentation_curve` |
+| Geometric CARE in log-coordinates, p_m = 2 Riccati conjecture test (plant-phenotyping §IV-J, Q12) | `kernelcal.control.fit_riccati_analytic`, `kernelcal.control.riccati_conjecture_test`, `kernelcal.control.PlantPhenotypingCAREAnalyzer` |
+| OU mean-reversion identification from kernel trajectories | `kernelcal.control.estimate_A_log_OU` |
+| GP ARD length-scales → empirical observation matrix C_obs | `kernelcal.control.ard_to_observation_matrix` |
+| Cowan–Farquhar-motivated source functional calibrated to p_m = 2 | `kernelcal.spectral.source.CowanFarquharSource` |
+| A2 counterexample: short-cycle topology floor failure | `kernelcal.terrain.a2_counterexample.run_worked_a2_counterexample`, `run_a2_sweep.py` |
 | Bandwidth-constrained protocol (P2 Alg. 1) | `kernelcal.terrain.diagnostics.bandwidth_optimal_modes` |
 | Observability ratio $R/\dot{I}_{\rm self}$ (P2 Table 2) | `kernelcal.terrain.diagnostics.observability_ratio` |
 | OCN as MaxCal fixed point (P3 Thm. 7.3) | `kernelcal.terrain.channels.drainage_network_graph` |
@@ -1035,6 +1041,38 @@ Cite the arXiv papers for the framework, **in preparation** manuscripts when cit
 
 ## Changelog
 
+### v0.9.2 (April 2026)
+- **New: `kernelcal.control`** — CARE (Continuous Algebraic Riccati Equation) solvers
+  and MaxCal-optimal controller identification for kernel-space dynamics (plant-phenotyping
+  manuscript §IV-J, spectral-kernel-dynamics Q12)
+  - `care.py`: `fit_riccati_analytic` (Fisher–Rao Q = ½ I analytic mode-wise solution),
+    `fit_riccati_residual` (scipy `solve_continuous_are` with residual reporting),
+    `care_residual`, `estimate_A_log_OU` (OU mean-reversion matrix from log-coordinate
+    kernel trajectories), `ard_to_observation_matrix` (GP ARD length-scales → C_obs),
+    `coupling_entropy_off_diagonal`, `off_diagonal_frobenius`,
+    `riccati_conjecture_test` (mode-wise p_m = 2 conformance), `landauer_R_lower_bound`,
+    plus result dataclasses `RiccatiAnalysisResult`, `RiccatiConjectureTest`,
+    `OUIdentificationResult`
+  - `analyzer.py`: `PlantPhenotypingCAREAnalyzer` end-to-end analyzer with
+    `CAREAnalyzerConfig`, `RotationInput`, `CAREAnalyzerState`
+- **New: `kernelcal.spectral.source.CowanFarquharSource`** — Cowan–Farquhar-motivated
+  source functional for plant photosynthesis; `calibrated()` factory produces an
+  instance for which the Riccati p_m = 2 conjecture holds at the target fixed point
+  (instrumentation source for CARE analyzer tests and stress-perturbation simulations)
+- **New: `kernelcal.terrain.a2_counterexample`** — worked A2 simulation for the
+  topology floor k_min = β₀ + β₁ caveat
+  - `run_worked_a2_counterexample`: paired long-cycle control vs. short-cycle figure-eight
+    case showing projected cycle-rank collapse at the same k_min
+  - `run_a2_cycle_ratio_sweep` + `run_a2_sweep.py` CLI: parametric sweep over cycle-length
+    ratio γ = ℓ_max / ℓ_min with JSON/CSV exports and analytic bound-constant fitting
+- **New: `route3_conservation_test.py`** (moved to repo root) — direct algebraic test of
+  ∇_K T_k = 0 on P8; measures D_m at the Gaussian-MI fixed point (P2 §8.1)
+- **Tests added** — `tests/test_control_care.py` (CARE analytic/residual solvers,
+  conjecture test, OU identification, Landauer bound) and `tests/test_a2_counterexample.py`
+  (long-cycle vs. short-cycle rank check, sweep reproducibility, CSV/JSON round-trip);
+  full suite now 265 tests
+- **Fixed** README path for `route3_conservation_test.py` (repo root, not under `kernelcal/`)
+
 ### v0.9.1 (April 2026)
 - **New: critical-node diagnostics in `kernelcal.terrain.channels`**
   - `identify_critical_nodes()` with `auto/exact/greedy` group selection
@@ -1135,5 +1173,5 @@ Cite the arXiv papers for the framework, **in preparation** manuscripts when cit
   - `biosig.py`: topological biosignature Δβ₁ (P4 Def. 1), detection threshold, cross-kernel factorization test, plume spectral entropy biosignature
   - `diagnostics.py`: fixed-point kernel, spectral entropy, Fiedler-mode gap, stability–conservation tradeoff (Route 3 / P2 Prop. 1b), phase-transition sweep, observability ratio, bandwidth-optimal mode selection
   - 66 tests, stdlib-only (numpy + scipy)
-- **Route 3 result** numerically verified and documented: conservation identity D_m = H_mm = −Δ′ for Gaussian MI source on P8 (`kernelcal/route3_conservation_test.py`)
+- **Route 3 result** numerically verified and documented: conservation identity D_m = H_mm = −Δ′ for Gaussian MI source on P8 (`route3_conservation_test.py`)
 - Paper series expanded to P1–P4; README and citation block updated

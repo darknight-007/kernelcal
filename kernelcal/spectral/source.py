@@ -255,3 +255,169 @@ class CoupledGaussianMISource(GaussianMISource):
             f"sigma2={self.sigma2}, mu2={self.mu2}, weights={spectral}, "
             f"eta={self.eta}, coupled={coupled})"
         )
+
+
+class CowanFarquharSource:
+    """Cowan-Farquhar-motivated source functional for plant photosynthesis.
+
+    Motivation
+    ----------
+    The p_m = 2 Riccati conjecture of Section IV-J of the plant-phenotyping
+    manuscript holds when the source satisfies
+
+        T_l(h^*) = 1/8 - lambda_m
+
+    at the MaxCal fixed point.  The Gaussian MI source of `GaussianMISource`
+    does not satisfy this condition for arbitrary (sigma^2, mu_2).  This
+    class provides a candidate source motivated by the Cowan-Farquhar
+    stomatal optimality principle: plants adjust stomatal conductance to
+    maximise net carbon assimilation per unit water loss, an evolutionary
+    optimum that couples assimilation (carbon MI analogue) to a
+    water-loss cost that is linearly eigenvalue-weighted.
+
+    The functional is
+
+        T_l(h) = alpha * w_l / (1 + h(lambda_l)/h_sat)   -   kappa * lambda_l
+
+    where the first term is an assimilation-MI analogue (saturating in h,
+    eigenvalue-weighted by w_l) and the second term is the
+    eigenvalue-linear water-loss cost.  Given `lambda_m`, the
+    parameters (alpha, h_sat, kappa) are calibrated so that the
+    Section IV-J condition holds at a target fixed point h^* by solving
+
+        alpha * w_l / (1 + h_l^*/h_sat)  -  kappa * lambda_l  = 1/8 - lambda_l
+
+    on the chosen calibration set (default: all eigenmodes).
+
+    The default factory method `calibrated` returns an instance for which
+    the Riccati conjecture p_m = 2 is satisfiable at the pre-stress
+    fixed point; perturbations away from this source degrade p_m and
+    drive the off-diagonal Riccati biosignature predicted by the paper.
+
+    This is an INSTRUMENTATION source: it exists so the CARE analyzer can
+    be unit-tested against a case where the conjecture is known to hold,
+    and so perturbed-parameter simulations produce the predicted
+    off-diagonal P growth during stress onset.  It is NOT a claim that
+    this specific algebraic form captures Cowan-Farquhar photosynthesis.
+    """
+
+    def __init__(
+        self,
+        alpha: float = 1.0,
+        h_sat: float = 1.0,
+        kappa: float = 0.0,
+        eigenvalues: Optional[np.ndarray] = None,
+        eigenvalue_weighted: bool = True,
+    ) -> None:
+        self.alpha = float(alpha)
+        self.h_sat = float(h_sat)
+        self.kappa = float(kappa)
+        self._lambda = (
+            np.asarray(eigenvalues, dtype=float)
+            if eigenvalues is not None
+            else None
+        )
+        self._eig_weighted = bool(eigenvalue_weighted)
+
+    @classmethod
+    def calibrated(
+        cls,
+        eigenvalues: np.ndarray,
+        h_star_target: np.ndarray,
+        eigenvalue_weighted: bool = False,
+    ) -> "CowanFarquharSource":
+        """Build a source so T_l(h_star_target) = 1/8 - lambda_l.
+
+        Solves for (alpha, h_sat, kappa) by least-squares on the
+        Section IV-J source condition.  When it is not achievable
+        exactly (N > 3), returns the best-fit source; the resulting
+        Riccati conjecture test will then quantify departure from p_m = 2.
+        """
+        lam = np.asarray(eigenvalues, dtype=float)
+        hs = np.asarray(h_star_target, dtype=float)
+        if lam.shape != hs.shape:
+            raise ValueError("eigenvalues and h_star_target must align.")
+        N = lam.size
+        w = lam if eigenvalue_weighted else np.ones_like(lam)
+
+        target = 0.125 - lam
+        h_sat_init = float(np.mean(hs)) if np.mean(hs) > 0 else 1.0
+        alpha_init = 1.0
+        kappa_init = 0.0
+
+        from scipy.optimize import least_squares
+
+        def residuals(params):
+            alpha, h_sat, kappa = params
+            if h_sat <= 0:
+                return np.full(N, 1e6)
+            t = alpha * w / (1.0 + hs / h_sat) - kappa * lam
+            return t - target
+
+        sol = least_squares(
+            residuals,
+            x0=[alpha_init, h_sat_init, kappa_init],
+            bounds=([1e-6, 1e-6, -10.0], [1e3, 1e3, 10.0]),
+            max_nfev=2000,
+            xtol=1e-12,
+            ftol=1e-12,
+        )
+        alpha_fit, h_sat_fit, kappa_fit = sol.x
+        return cls(
+            alpha=float(alpha_fit),
+            h_sat=float(h_sat_fit),
+            kappa=float(kappa_fit),
+            eigenvalues=lam,
+            eigenvalue_weighted=eigenvalue_weighted,
+        )
+
+    def _weights(self, N: int) -> np.ndarray:
+        if self._lambda is None:
+            return np.ones(N, dtype=float) if not self._eig_weighted else np.arange(1, N + 1, dtype=float)
+        if self._lambda.shape[0] != N:
+            raise ValueError(
+                f"eigenvalue array length {self._lambda.shape[0]} does not match N={N}."
+            )
+        return self._lambda if self._eig_weighted else np.ones(N, dtype=float)
+
+    def _lambda_vec(self, N: int) -> np.ndarray:
+        if self._lambda is None:
+            return np.zeros(N, dtype=float)
+        return self._lambda
+
+    # ------------------------------------------------------------------
+    # Source functional interface (matches GaussianMISource)
+    # ------------------------------------------------------------------
+
+    def T(self, h: np.ndarray) -> np.ndarray:
+        h = np.asarray(h, dtype=float)
+        N = h.size
+        w = self._weights(N)
+        lam = self._lambda_vec(N)
+        denom = 1.0 + h / self.h_sat
+        return self.alpha * w / denom - self.kappa * lam
+
+    def dT_dh(self, h: np.ndarray) -> np.ndarray:
+        h = np.asarray(h, dtype=float)
+        N = h.size
+        w = self._weights(N)
+        denom = 1.0 + h / self.h_sat
+        return -self.alpha * w / (self.h_sat * denom * denom)
+
+    def jacobian(self, h: np.ndarray) -> np.ndarray:
+        """Diagonal Jacobian in the mode-separable Cowan-Farquhar form."""
+        return np.diag(self.dT_dh(h))
+
+    def stability_margin(self, h_star: np.ndarray) -> np.ndarray:
+        return self.dT_dh(h_star) - (-1.0 / np.asarray(h_star, dtype=float))
+
+    def is_stable(self, h_star: np.ndarray) -> bool:
+        return bool(np.all(self.stability_margin(h_star) > 0))
+
+    def __repr__(self) -> str:
+        return (
+            "CowanFarquharSource("
+            f"alpha={self.alpha:.4g}, h_sat={self.h_sat:.4g}, "
+            f"kappa={self.kappa:.4g}, "
+            f"eig_weighted={self._eig_weighted})"
+        )

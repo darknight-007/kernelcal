@@ -127,6 +127,7 @@ from .spectral import (
     SpectralGraph,
     GaussianMISource,
     CoupledGaussianMISource,
+    CowanFarquharSource,
     ProceduralSpectralDiagnostics,
     procedural_graph_spectral_diagnostics,
     SpectralKernelDynamics,
@@ -136,6 +137,27 @@ from .spectral import (
     hessian_gap,
     coupling_entropy,
 )
+try:
+    from .control import (
+        fit_riccati_analytic,
+        fit_riccati_residual,
+        care_residual,
+        estimate_A_log_OU,
+        ard_to_observation_matrix,
+        coupling_entropy_off_diagonal,
+        off_diagonal_frobenius,
+        riccati_conjecture_test,
+        landauer_R_lower_bound,
+        RiccatiAnalysisResult,
+        RiccatiConjectureTest,
+        OUIdentificationResult,
+        PlantPhenotypingCAREAnalyzer,
+        CAREAnalyzerConfig,
+        RotationInput,
+        CAREAnalyzerState,
+    )
+except ImportError:
+    pass
 from .video import (
     CompressedDepthFrame,
     DepthStreamCodec,
@@ -176,7 +198,7 @@ from .geo3d import (
     vietoris_rips_persistence,
 )
 
-__version__ = "0.9.0"
+__version__ = "0.9.2"
 
 __all__ = [
     # kernel
@@ -238,6 +260,7 @@ __all__ = [
     "SpectralGraph",
     "GaussianMISource",
     "CoupledGaussianMISource",
+    "CowanFarquharSource",
     "ProceduralSpectralDiagnostics",
     "procedural_graph_spectral_diagnostics",
     "SpectralKernelDynamics",
@@ -246,6 +269,23 @@ __all__ = [
     "spectral_entropy",
     "hessian_gap",
     "coupling_entropy",
+    # control (CARE)
+    "fit_riccati_analytic",
+    "fit_riccati_residual",
+    "care_residual",
+    "estimate_A_log_OU",
+    "ard_to_observation_matrix",
+    "coupling_entropy_off_diagonal",
+    "off_diagonal_frobenius",
+    "riccati_conjecture_test",
+    "landauer_R_lower_bound",
+    "RiccatiAnalysisResult",
+    "RiccatiConjectureTest",
+    "OUIdentificationResult",
+    "PlantPhenotypingCAREAnalyzer",
+    "CAREAnalyzerConfig",
+    "RotationInput",
+    "CAREAnalyzerState",
     # video
     "CompressedDepthFrame",
     "DepthStreamCodec",
