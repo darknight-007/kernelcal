@@ -4,7 +4,7 @@ Submodules
 ----------
 dem          DEM processing: graph construction, D8 flow routing, slope/curvature
 craters      Crater rim detection, Betti numbers, abiotic null model
-channels     Drainage network graphs, Strahler ordering, triple spectral diagnostic
+channels     Drainage network graphs, Strahler ordering, critical-node diagnostics
 biosig       Topological biosignature (Δβ₁), cross-kernel test, plume entropy
 diagnostics  Spectral entropy, fixed-point kernel, phase-transition sweep
 
@@ -36,8 +36,16 @@ from .craters    import (detect_craters, crater_rim_mask, crater_rim_graph,
                           crater_spectral_signature, CraterCandidate)
 from .channels   import (drainage_network_graph, drainage_graph_laplacian,
                           triple_spectral_diagnostic, curl_energy,
+                          pairwise_connectivity_after_removal,
+                          subbasins_after_removal,
+                          betweenness_centrality_undirected,
+                          most_central_nodes,
+                          group_betweenness_score,
+                          identify_critical_nodes,
+                          critical_fragmentation_curve,
                           abiotic_beta1_channels, topology_budget,
-                          DrainageGraph, ChannelDiagnostic)
+                          DrainageGraph, ChannelDiagnostic,
+                          CriticalNodeResult, CriticalNodeCurve)
 from .biosig     import (topological_biosignature, detection_threshold,
                           cross_kernel, cross_kernel_norm, factorization_test,
                           spectral_kernel_from_laplacian,
@@ -69,8 +77,13 @@ __all__ = [
     # channels
     "drainage_network_graph", "drainage_graph_laplacian",
     "triple_spectral_diagnostic", "curl_energy",
+    "pairwise_connectivity_after_removal", "subbasins_after_removal",
+    "betweenness_centrality_undirected", "most_central_nodes",
+    "group_betweenness_score", "identify_critical_nodes",
+    "critical_fragmentation_curve",
     "abiotic_beta1_channels", "topology_budget",
     "DrainageGraph", "ChannelDiagnostic",
+    "CriticalNodeResult", "CriticalNodeCurve",
     # biosig
     "topological_biosignature", "detection_threshold",
     "cross_kernel", "cross_kernel_norm", "factorization_test",

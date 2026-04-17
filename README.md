@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
-> **Status:** research companion library, v0.5.0 — pre-publication, API subject to change.
+> **Status:** research companion library, v0.9.0 — pre-publication, API subject to change.
 
 Companion library to the **kernel dynamics paper series** (foundations and graph-spectral theory on arXiv; application manuscripts P2–P4 in preparation):
 
@@ -49,8 +49,8 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.attention` | MaxCal diagnostics on transformer attention kernels: GPT-2 probing, toy training, Landauer bound, perturbation-relaxation, grokking phase detection |
 | `kernelcal.fluid` | Fluid learning dynamics under MaxCal; kernel-trajectory experiments for flow-based systems |
 | `kernelcal.bandits` | **Decentralised Dynamic-Kernel GP-UCB (DDK-GPUCB):** spatiotemporal bandit simulation with learnable mixture kernels, gossip consensus, and Chebyshev-accelerated mixing |
-| `kernelcal.geo3d` | **Spectral compression for 3D geometry:** point clouds, triangle meshes (DAE/OBJ), and temporal LiDAR sequences. Hodge Laplacian complex (L₀/L₁/L₂), persistent homology (0D/1D), compression ratio bounds, Nyström large-mesh path. **`score_compression()`** self-introspection: four-channel quality report (geometry / spectral / kernel / topology) with composite loss and grade |
-| `kernelcal.terrain` | **Planetary terrain analysis and topological biosignature detection** (P2, P3, P4). DEM→graph pipeline (D8 flow routing, slope/curvature), crater rim detection and Betti numbers, drainage network graphs (Strahler ordering, max-flow/min-cut), the triple spectral diagnostic for channel detection (Proposition 3, P2), topological biosignature Δβ₁, cross-kernel factorization test, plume spectral entropy biosignature, fixed-point kernel, stability–conservation tradeoff (Route 3), bandwidth-optimal mode selection, observability ratio. **66 tests, stdlib-only (numpy + scipy).** |
+| `kernelcal.geo3d` | **Spectral compression for 3D geometry:** point clouds, triangle meshes (DAE/OBJ), and temporal LiDAR sequences. Hodge Laplacian complex (L₀/L₁/L₂), persistent homology (0D/1D), compression ratio bounds, Nyström large-mesh path. **`score_compression()`** self-introspection: four-channel quality report (geometry / spectral / kernel / topology) with composite loss and grade. **`decoder.py`** three-stage receiving pipeline: skeleton reconstruction (Theorem 1 topology guard) + D_m conservation-deficit gate + detail dispatch. **`detail_synthesis.py`** five detail methods: fractal noise (H[h*] → roughness), curl-gated flow textures (E_curl), latent-code scene library, landmark Poisson pinning, D_m octave boost. |
+| `kernelcal.terrain` | **Planetary terrain analysis and topological biosignature detection** (P2, P3, P4). DEM→graph pipeline (D8 flow routing, slope/curvature), crater rim detection and Betti numbers, drainage network graphs (Strahler ordering, max-flow/min-cut), the triple spectral diagnostic for channel detection (Proposition 3, P2), **critical-node fragmentation diagnostics** (group-betweenness critical sets, pairwise-connectivity decay, sub-basin growth), topological biosignature Δβ₁, cross-kernel factorization test, plume spectral entropy biosignature, fixed-point kernel, stability–conservation tradeoff (Route 3), bandwidth-optimal mode selection, observability ratio. **70 tests, stdlib-only (numpy + scipy).** |
 
 ### Reviewer entry points
 
@@ -104,6 +104,7 @@ from kernelcal.terrain import (
     dem_to_graph, terrain_graph_laplacian,
     d8_flow_direction, flow_accumulation,
     drainage_network_graph, triple_spectral_diagnostic, topology_budget,
+    identify_critical_nodes, critical_fragmentation_curve,
     crater_rim_graph, crater_betti_numbers, abiotic_beta1_craters,
     topological_biosignature, detection_threshold,
     cross_kernel_norm, factorization_test,
@@ -131,6 +132,16 @@ budget   = topology_budget(dg)                    # {'beta0':1,'beta1':3,'kmin':
 diag     = triple_spectral_diagnostic(dg)         # P2 Proposition 3
 print(f"H={diag.H_spectral:.3f}  E_curl={diag.E_curl:.4f}  β₁={diag.beta1}")
 print(f"Triple diagnostic (channeled?): {diag.is_channeled}")
+
+# ── Critical-node fragmentation diagnostics (P3 / H2 companion) ─────────────
+crit = identify_critical_nodes(dg, k=5, method="auto")
+print(f"Critical nodes (k=5): {crit.nodes.tolist()}  "
+      f"PC={crit.pairwise_connectivity}  subbasins={crit.subbasins}")
+
+curve = critical_fragmentation_curve(dg, k_max=8, method="auto", compare_central=True)
+print(f"PC power-law slope (critical): {curve.powerlaw_slope_pc_critical:.3f}")
+print(f"Sub-basin linear slope (critical): {curve.linear_slope_subbasins_critical:.3f}")
+print(f"Mean PC advantage vs central baseline: {curve.mean_pc_advantage_critical:.2f}")
 
 # ── Topological biosignature detection threshold (P4 Proposition 1) ────────
 thresh = detection_threshold(beta1_abio=2, delta_beta1=1,
@@ -280,6 +291,127 @@ python -m kernelcal.attention.training \
     --primes 23 53 97 --seeds 10 --steps 2000 \
     --output-dir figures/attention
 ```
+
+### Digital twin decoder — `kernelcal.geo3d.decoder` + `kernelcal.geo3d.detail_synthesis`
+
+Full receiving pipeline for bandwidth-constrained planetary digital twins.
+The rover transmits a `LargeMeshCompressed` payload (~1.5 KB for 128 modes) plus a telemetry
+vector `[D_t, H[h*], E_curl, latent_code, β₀, β₁, β₂]`.
+The ground station decoder reconstructs a topology-preserving skeleton and synthesizes
+high-frequency details that were never transmitted.
+
+```python
+import numpy as np
+from kernelcal.geo3d import (
+    LargeMeshCompressed, compress_obj,
+    SpectralTelemetry, decode,
+    synthesize, SCENE_LIBRARY,
+)
+
+# ── Encoder side (rover) ───────────────────────────────────────────────────
+compressed = compress_obj("terrain.obj", n_modes=128)
+# Rover computes and transmits telemetry alongside the payload
+telemetry_vector = [
+    14.2,   # D_t  (sum of per-mode conservation residuals)
+    2.81,   # H[h*] (spectral entropy)
+    5.71,   # Delta' (stability margin)
+    0.22,   # E_curl (curl energy fraction — channel activity)
+    4,      # latent_code  (4 = fluvial channel, see SCENE_LIBRARY)
+    1, 3,   # beta_0, beta_1
+    0,      # beta_2
+    1.0,    # timestamp
+]
+
+# ── Decoder side (ground station) ─────────────────────────────────────────
+k = compressed.meta["n_modes"]
+tel = SpectralTelemetry(
+    compressed     = compressed,
+    betti          = (1, 3, 0),
+    D_m_residuals  = np.full(k, 14.2 / k),   # uniform proxy; use per-mode if available
+    spectral_entropy = 2.81,
+    delta_prime    = 5.71,
+    curl_energy    = 0.22,
+    latent_code    = 4,                        # → 'Fluvial channel' preset
+)
+
+# Stage 1+2: reconstruct skeleton, assess detail level
+twin = decode(tel)
+print(f"Detail level : {twin.detail_level.value}")
+print(f"Patch request: {twin.request_patch}")
+print(f"D_t          : {twin.diagnostics['D_t']:.2f}")
+
+# Stage 3: synthesize high-frequency details
+synth = synthesize(twin, export_ply_path="/tmp/twin_detail.ply")
+print(f"Scene class  : {synth.diagnostics['scene_class']}")
+print(f"RMS disp     : {synth.diagnostics['disp_rms']:.4f}")
+print(f"Octaves used : {synth.diagnostics['octaves_used']}")
+```
+
+Detail level routing:
+
+| `D_t` range | Level | Methods applied |
+|---|---|---|
+| `< 1.0` | `low` | Fractal noise (A) |
+| `1.0–5.0` | `medium` | Noise (A) + curl textures (B) |
+| `5.0–20.0` | `high` | Noise + curl + landmark pinning (D) + D_m octave boost (E) |
+| `> 20.0` | `patch_request` | All methods + re-transmission flag on `/twin/patch_request` |
+
+Scene class presets (latent codes 0–7): Regolith plain, Boulder field, Crater interior,
+Lava plain, Fluvial channel, Ice/frost deposit, Ejecta blanket, Dune field.
+
+**Blender visualization** (`kernelcal/blender/twin_receiver.py`):
+
+```bash
+SCRIPT=$(python3 -c "import kernelcal.blender, os; \
+    print(os.path.join(os.path.dirname(kernelcal.blender.__file__), 'twin_receiver.py'))")
+$BLENDER --background --python "$SCRIPT" -- \
+    --mesh_npz /tmp/twin_payload.npz \
+    --diagnostics_json /tmp/twin_diag.json \
+    --out_obj /tmp/twin_rendered.obj \
+    --out_blend /tmp/twin_scene.blend
+```
+
+Applies procedural shader nodes driven by H[h*] and E_curl, vertex-color curl heatmap
+(blue = gradient terrain, red = channel/flow region), and patch-request red tint overlay.
+
+**ROS2 bridge** (`ros2_ws/.../digital_twin_node.py`):
+
+```bash
+ros2 run bloom_maxcal_sim digital_twin_node \
+    --ros-args -p export_ply:=true -p export_dir:=/tmp/twin_frames -p publish_rate:=2.0
+```
+
+Subscribes to `/twin/spectral_update` (NPZ payload) and `/twin/telemetry` (Float32MultiArray),
+publishes decoded skeleton and synthesized mesh as RViz `TRIANGLE_LIST` markers,
+curl heatmap as `PointCloud2`, and patch-request flag as `Bool`.
+
+---
+
+### Q10 topology experiment — `kernelcal/blender/`
+
+End-to-end verification of the Nyström topology error open problem (Q10, paper §8.5).
+Blender generates controlled terrain with known β₁; kernelcal measures the Nyström estimate.
+
+```bash
+export BLENDER=/path/to/blender
+./kernelcal/blender/run_q10_experiment.sh \
+    --all_loops \
+    --resolutions 32,64,128,256 \
+    --out_dir /tmp/q10_terrains
+```
+
+Runs three terrain families (n_loops ∈ {3, 5, 13}), each at four resolutions.
+Pass condition (paper Q10): `|β̂₁ − β₁|` is monotonically non-increasing under refinement,
+and exact recovery (`error = 0`) is achieved at ≥ 1 resolution.
+
+| File | Role |
+|---|---|
+| `kernelcal/blender/terrain_gen.py` | Blender: Perlin noise + ring-channel loops + craters → OBJ + JSON sidecar |
+| `kernelcal/blender/q10_pipeline.py` | kernelcal: load OBJ, Nyström β₁ estimate, Q10 pass/fail report |
+| `kernelcal/blender/run_q10_experiment.sh` | Orchestrator: Blender headless → kernelcal → JSON report + exit code |
+| `kernelcal/blender/twin_receiver.py` | Blender: load synthesized twin NPZ, apply procedural material, export |
+
+---
 
 ### 3D spectral compression (v0.4.2) — `kernelcal.geo3d`
 
@@ -607,7 +739,7 @@ kernelcal/
 ├── fluid/                 # NEW v0.3.0
 │   ├── dynamics.py        # FluidKernelDynamics: MaxCal-governed flow learning
 │   └── experiments.py     # Experiment runners for fluid kernel trajectories
-├── geo3d/                 # NEW v0.4.0 — spectral 3D compression
+├── geo3d/                 # NEW v0.4.0 — spectral 3D compression + decoder
 │   ├── graph3d.py         # k-NN adjacency, combinatorial Laplacian, subsampling
 │   ├── spectral_codec.py  # CompressedSpectralKernel, compress_point_cloud, heat-kernel weights
 │   ├── mesh.py            # CompressedMeshGeometry, compress/decompress_mesh_roundtrip, DAE IO
@@ -615,7 +747,9 @@ kernelcal/
 │   ├── hodge.py           # Hodge complex: B₁/B₂, L₀/L₁/L₂, Betti numbers, hodge_decompose
 │   ├── topology.py        # Persistent homology: 0D (union-find), 1D (matrix reduction), VR
 │   ├── bounds.py          # CompressionBounds, CompressionScore, score_compression(); ratio, distortion, topology
-│   └── large_mesh.py      # LargeMeshCompressed, Nyström extension, LOBPCG, load_obj, compress_obj
+│   ├── large_mesh.py      # LargeMeshCompressed, Nyström extension, LOBPCG, load_obj, compress_obj
+│   ├── decoder.py         # NEW v0.9.0 — SpectralTelemetry, decode(), triage_detail_level(), D_m gate
+│   └── detail_synthesis.py # NEW v0.9.0 — synthesize(); fractal noise, curl textures, landmark pinning
 └── bandits/               # NEW v0.3.0 — DDK-GPUCB simulation suite
     ├── field.py           # SpatiotemporalField: (x,t) arms, SE×Per vs SE regions
     ├── kernels.py         # AnisotropicSEKernel, SEPeriodicKernel, MixtureKernel
@@ -634,10 +768,18 @@ ros2_ws/
     │   ├── bloom_field_node.py
     │   ├── maxcal_controller_node.py
     │   ├── rover_sim_node.py
-    │   └── visualizer_node.py
+    │   ├── visualizer_node.py
+    │   └── digital_twin_node.py # NEW v0.9.0 — spectral twin decoder + RViz publisher
     ├── demo_bloom_maxcal.py     # Standalone demo (no ROS2 needed)
     ├── launch/bloom_sim.launch.py
     └── config/default.yaml
+
+kernelcal/blender/               # NEW v0.9.0 — Blender/kernelcal integration subpackage
+├── __init__.py                  # Package marker; no bpy import at module level
+├── terrain_gen.py               # Blender: procedural terrain with known β₁, OBJ + JSON export
+├── q10_pipeline.py              # kernelcal: Nyström β₁ vs. ground truth, Q10 pass/fail
+├── run_q10_experiment.sh        # Orchestrator: headless Blender → kernelcal → report
+└── twin_receiver.py             # Blender: load synthesized twin NPZ, shader nodes, export
 ```
 
 ### Energy monitoring
@@ -706,10 +848,17 @@ run_landauer_server.sh       # One-command: build → run → merge → figure
 | Fluid learning dynamics under MaxCal (§) | `kernelcal.fluid.dynamics` |
 | Bloom field MaxCal rover (§) | `ros2_ws/bloom_maxcal_sim` |
 
+| Digital twin decoder — Stage 1 topology guard (P2 Thm. 1) | `kernelcal.geo3d.decoder.reconstruct_skeleton` |
+| Digital twin decoder — Stage 2 D_m triage (P2 Prop. 2) | `kernelcal.geo3d.decoder.triage_detail_level` |
+| Digital twin decoder — Stage 3 detail synthesis | `kernelcal.geo3d.detail_synthesis.synthesize` |
+| Q10 experiment — Nyström β₁ error vs. ground truth | `kernelcal.blender.q10_pipeline` |
+| Q10 terrain-to-path-space mapping (Bhattacharya & Ghrist 2017) | `kernelcal/blender/q10_pipeline.py::terrain_to_path_space_mapping` |
+| ROS2 digital twin subscriber / RViz publisher | `ros2_ws/.../digital_twin_node.py` |
 | Stability–conservation tradeoff $D_m = H_{mm} = -\Delta'$ (P2 Prop. 1b) | `kernelcal.terrain.diagnostics.stability_conservation_tradeoff` |
 | Route 3 numerical verification (P2 Exp. 4) | `kernelcal/route3_conservation_test.py`, `tests/test_terrain.py::TestDiagnostics` |
 | Topological Conservation Theorem $k_{\min} = \beta_0 + \beta_1$ (P2 Thm. 1) | `kernelcal.terrain.craters.abiotic_beta1_craters`, `kernelcal.terrain.channels.topology_budget` |
 | Triple spectral diagnostic (P2 Prop. 3) | `kernelcal.terrain.channels.triple_spectral_diagnostic` |
+| Critical-node fragmentation and group-betweenness diagnostics (P3/H2) | `kernelcal.terrain.channels.identify_critical_nodes`, `kernelcal.terrain.channels.critical_fragmentation_curve` |
 | Bandwidth-constrained protocol (P2 Alg. 1) | `kernelcal.terrain.diagnostics.bandwidth_optimal_modes` |
 | Observability ratio $R/\dot{I}_{\rm self}$ (P2 Table 2) | `kernelcal.terrain.diagnostics.observability_ratio` |
 | OCN as MaxCal fixed point (P3 Thm. 7.3) | `kernelcal.terrain.channels.drainage_network_graph` |
@@ -885,6 +1034,55 @@ Cite the arXiv papers for the framework, **in preparation** manuscripts when cit
 ---
 
 ## Changelog
+
+### v0.9.1 (April 2026)
+- **New: critical-node diagnostics in `kernelcal.terrain.channels`**
+  - `identify_critical_nodes()` with `auto/exact/greedy` group selection
+  - `pairwise_connectivity_after_removal()` and `subbasins_after_removal()`
+  - `betweenness_centrality_undirected()` and `most_central_nodes()` baseline
+  - `critical_fragmentation_curve()` returning PC power-law slope and sub-basin linear slope
+- **Exports updated** in `kernelcal.terrain.__init__` for all critical-node APIs
+- **Tests added** in `tests/test_terrain.py` for connectivity accounting, group-betweenness equivalence, and critical-vs-central fragmentation behavior (terrain suite: 70 tests; full suite: 237 tests)
+- **New: Bishop scarp abiotic calibration** — `bishop_kernelcal.py`, `bishop_mode_decomposition.py`,
+  `bishop_trait_analysis.py` with `bishop_figures/` outputs (760 ka welded Bishop Tuff,
+  Volcanic Tablelands, CA; three abiotic controllers: volcanic fracturing, geomorphic transport,
+  tectonic strain; 82,122 Mask R-CNN rock centroids)
+- **New: Bobcat Fire spatial + GeoTIFF export pipeline**
+  - `bf_geotiff_export.py`: EPSG:4326 GeoTIFFs (channel masks per timestamp, 4-band RGBA composite,
+    temporal count, rock mask + eccentricity + major-axis rasters) — QGIS/GDAL/ArcGIS ready
+  - `bf_spatial_overlay.py`: true-spatial polygon overlays (all 4 timestamps, rock layer,
+    appear/disappear diff maps, controller-removal summary) with WGS-84 geometry
+  - `bf_vegetation_segment.py`: batch Grounded-SAM-2 vegetation segmentation (shrub / unburned /
+    burned / bare soil) → TiledGISLabel CSVs for DeepGIS-XR import
+- **New: phase-space figure regeneration scripts** — `make_phasespace_figure.py` (P4 Fig 11) and
+  `make_robbins_phasespace_figure.py` with current empirical ΔH / Δβ₁ values
+- **New: `synthetic_planetary_mesh_experiment.py`** — self-contained fBm + crater + dendritic
+  channel mesh generator (replaces external OBJ dependency; used for geo3d topology tests)
+
+### v0.9.0 (April 2026)
+- **New: `kernelcal.geo3d.decoder`** — three-stage digital twin receiving pipeline
+  - Stage 1: `reconstruct_skeleton()` — topology-preserving decompression with k ≥ β₀+β₁ guard (Theorem 1)
+  - Stage 2: `triage_detail_level()` — D_m conservation-deficit gate routing to five detail levels
+  - Stage 3: dispatch to `detail_synthesis.synthesize()` based on H[h*], E_curl, latent code
+- **New: `kernelcal.geo3d.detail_synthesis`** — five high-frequency detail methods (numpy-only, no external deps)
+  - Method A: multi-octave fractal noise; roughness and octave count scale with H[h*]
+  - Method B: curl-gated flow/channel textures activated by E_curl > threshold
+  - Method C: latent-code scene library (8 planetary scene presets: regolith, boulders, crater, lava, channel, ice, ejecta, dune)
+  - Method D: sparse landmark pinning via RBF interpolation (Poisson-style surface detail)
+  - Method E: D_m octave boost (up to +4 octaves when information loss is high)
+  - PLY export with per-vertex curl heatmap (MeshLab-compatible colored point cloud)
+- **New: `kernelcal/blender/` — Q10 topology experiment pipeline**
+  - `terrain_gen.py`: Blender headless terrain generator using `mathutils.noise.turbulence` (no external `noise` package); produces OBJ + JSON sidecar with ground-truth β₁ = n_loops
+  - `q10_pipeline.py`: kernelcal-only Nyström β₁ verification; Q10 pass/fail with terrain-to-path-space mapping documented inline
+  - `run_q10_experiment.sh`: single-command orchestrator; Blender dependency check + PYTHONPATH injection; supports `--all_loops` flag for full {3, 5, 13} benchmark set
+- **New: `ros2_ws/.../digital_twin_node.py`** — ROS2 subscriber/decoder/publisher
+  - Subscribes: `/twin/spectral_update` (NPZ), `/twin/telemetry` (Float32MultiArray), `/twin/landmarks` (PointCloud2)
+  - Publishes: skeleton and detail mesh as RViz `TRIANGLE_LIST` Markers, curl heatmap as PointCloud2, patch-request Bool, diagnostics JSON
+  - Per-frame PLY/OBJ export for MeshLab post-processing (toggle with `export_ply` parameter)
+- **New: `kernelcal/blender/twin_receiver.py`** — Blender visualization receiver
+  - Procedural shader node tree driven by H[h*] (noise roughness) and E_curl (curl heatmap)
+  - Vertex color channel: blue = spectral/gradient terrain, red = curl-active channel regions
+  - Patch-request red tint overlay when D_t exceeds threshold
 
 ### v0.8.0 (April 2026)
 - **Bobcat Fire analysis integrated** — `bf_kernelcal_demo.py` and

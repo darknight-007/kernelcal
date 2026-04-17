@@ -67,6 +67,25 @@ from .large_mesh import (
     load_obj,
     sparse_combinatorial_laplacian,
 )
+from .decoder import (
+    SpectralTelemetry,
+    DecodedTwin,
+    DetailLevel,
+    decode,
+    reconstruct_skeleton,
+    triage_detail_level,
+    compute_curl_energy,
+    export_decoded_obj,
+)
+from .detail_synthesis import (
+    SynthesizedTwin,
+    SCENE_LIBRARY,
+    synthesize,
+    procedural_displacement,
+    curl_texture_weight,
+    flow_displacement,
+    landmark_displacement,
+)
 
 __all__ = [
     # graph3d
@@ -105,6 +124,23 @@ __all__ = [
     "persistence_1d",
     "vietoris_rips_persistence",
     "mesh_persistence",
+    # decoder
+    "SpectralTelemetry",
+    "DecodedTwin",
+    "DetailLevel",
+    "decode",
+    "reconstruct_skeleton",
+    "triage_detail_level",
+    "compute_curl_energy",
+    "export_decoded_obj",
+    # detail_synthesis
+    "SynthesizedTwin",
+    "SCENE_LIBRARY",
+    "synthesize",
+    "procedural_displacement",
+    "curl_texture_weight",
+    "flow_displacement",
+    "landmark_displacement",
     # large_mesh
     "LargeMeshCompressed",
     "compress_large_mesh",

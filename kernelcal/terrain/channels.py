@@ -23,6 +23,8 @@ from __future__ import annotations
 import numpy as np
 from collections import deque
 from dataclasses import dataclass
+from itertools import combinations
+import math
 
 from .dem import (
     TerrainGraph, dem_to_graph, terrain_graph_laplacian,
@@ -348,6 +350,34 @@ class ChannelDiagnostic:
         return self.fiedler_concentrated and self.curl_elevated and self.beta1_anomalous
 
 
+@dataclass
+class CriticalNodeResult:
+    """Critical-node solution for a fixed group size k."""
+    k: int
+    nodes: np.ndarray                 # selected node ids
+    method_used: str                  # "exact" or "greedy"
+    pairwise_connectivity: int        # connected node pairs after node removal
+    disconnected_pairs: int           # removed-pair count = total_pairs - pairwise_connectivity
+    subbasins: int                    # connected components after removal
+
+
+@dataclass
+class CriticalNodeCurve:
+    """Fragmentation curves under critical-node and central-node deletion."""
+    k_values: np.ndarray
+    critical_nodes: list[np.ndarray]
+    central_nodes: list[np.ndarray] | None
+    pairwise_connectivity_critical: np.ndarray
+    pairwise_connectivity_central: np.ndarray | None
+    subbasins_critical: np.ndarray
+    subbasins_central: np.ndarray | None
+    powerlaw_slope_pc_critical: float
+    powerlaw_slope_pc_central: float | None
+    linear_slope_subbasins_critical: float
+    linear_slope_subbasins_central: float | None
+    mean_pc_advantage_critical: float | None
+
+
 def triple_spectral_diagnostic(
     dg:      DrainageGraph,
     dg_flat: DrainageGraph | None = None,
@@ -478,3 +508,342 @@ def topology_budget(dg: DrainageGraph) -> dict[str, int]:
         "n_nodes":      len(dg.nodes),
         "n_edges":      len(dg.undirected_edges),
     }
+
+
+# ---------------------------------------------------------------------------
+# Critical nodes: pairwise connectivity and group betweenness (P3/H2)
+# ---------------------------------------------------------------------------
+
+def _adjacency_list_from_dg(dg: DrainageGraph) -> list[list[int]]:
+    """Build an undirected adjacency list from DrainageGraph edges."""
+    n = len(dg.nodes)
+    adj = [[] for _ in range(n)]
+    for i, j in dg.undirected_edges:
+        ii, jj = int(i), int(j)
+        adj[ii].append(jj)
+        adj[jj].append(ii)
+    return adj
+
+
+def _component_sizes_after_removal(
+    n_nodes: int,
+    adj: list[list[int]],
+    removed: set[int],
+) -> list[int]:
+    """Connected-component sizes after deleting a node set."""
+    seen = np.zeros(n_nodes, dtype=bool)
+    for r in removed:
+        if 0 <= r < n_nodes:
+            seen[r] = True
+
+    sizes: list[int] = []
+    for s in range(n_nodes):
+        if seen[s]:
+            continue
+        q = deque([s])
+        seen[s] = True
+        size = 0
+        while q:
+            u = q.popleft()
+            size += 1
+            for v in adj[u]:
+                if not seen[v]:
+                    seen[v] = True
+                    q.append(v)
+        sizes.append(size)
+    return sizes
+
+
+def pairwise_connectivity_after_removal(
+    dg: DrainageGraph,
+    removed_nodes: np.ndarray | list[int] | tuple[int, ...] | None = None,
+) -> int:
+    """Pairwise connectivity after removing nodes.
+
+    Pairwise connectivity is the number of connected node pairs in the
+    remaining graph:
+
+        PC = sum_c |C_c| (|C_c| - 1) / 2
+
+    where C_c are connected components after deletion.
+    """
+    n = len(dg.nodes)
+    if n <= 1:
+        return 0
+    removed = set() if removed_nodes is None else set(int(x) for x in removed_nodes)
+    adj = _adjacency_list_from_dg(dg)
+    sizes = _component_sizes_after_removal(n, adj, removed)
+    return int(sum(s * (s - 1) // 2 for s in sizes))
+
+
+def subbasins_after_removal(
+    dg: DrainageGraph,
+    removed_nodes: np.ndarray | list[int] | tuple[int, ...] | None = None,
+) -> int:
+    """Number of connected components (sub-basins) after node deletion."""
+    n = len(dg.nodes)
+    if n == 0:
+        return 0
+    removed = set() if removed_nodes is None else set(int(x) for x in removed_nodes)
+    adj = _adjacency_list_from_dg(dg)
+    return int(len(_component_sizes_after_removal(n, adj, removed)))
+
+
+def betweenness_centrality_undirected(dg: DrainageGraph) -> np.ndarray:
+    """Unweighted undirected node betweenness centrality (Brandes algorithm)."""
+    n = len(dg.nodes)
+    if n == 0:
+        return np.array([], dtype=float)
+
+    adj = _adjacency_list_from_dg(dg)
+    bc = np.zeros(n, dtype=float)
+
+    for s in range(n):
+        stack: list[int] = []
+        pred: list[list[int]] = [[] for _ in range(n)]
+        sigma = np.zeros(n, dtype=float)
+        sigma[s] = 1.0
+        dist = -np.ones(n, dtype=np.int32)
+        dist[s] = 0
+
+        q = deque([s])
+        while q:
+            v = q.popleft()
+            stack.append(v)
+            for w in adj[v]:
+                if dist[w] < 0:
+                    q.append(w)
+                    dist[w] = dist[v] + 1
+                if dist[w] == dist[v] + 1:
+                    sigma[w] += sigma[v]
+                    pred[w].append(v)
+
+        delta = np.zeros(n, dtype=float)
+        while stack:
+            w = stack.pop()
+            if sigma[w] > 0:
+                for v in pred[w]:
+                    delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w])
+            if w != s:
+                bc[w] += delta[w]
+
+    # undirected graph correction
+    bc *= 0.5
+    return bc
+
+
+def most_central_nodes(dg: DrainageGraph, k: int) -> np.ndarray:
+    """Top-k nodes by individual betweenness centrality."""
+    n = len(dg.nodes)
+    if n == 0 or k <= 0:
+        return np.array([], dtype=int)
+    k = int(min(k, n))
+    bc = betweenness_centrality_undirected(dg)
+    order = np.argsort(-bc, kind="mergesort")  # stable tie break by index
+    return order[:k].astype(int)
+
+
+def group_betweenness_score(
+    dg: DrainageGraph,
+    nodes: np.ndarray | list[int] | tuple[int, ...],
+) -> int:
+    """Group-betweenness proxy on trees via disconnected shortest-path pairs.
+
+    On a tree, there is exactly one shortest path between any pair of nodes.
+    Therefore, group betweenness of a node set S equals the number of node
+    pairs disconnected by deleting S, i.e. total_pairs - pairwise_connectivity.
+    """
+    n = len(dg.nodes)
+    total_pairs = n * (n - 1) // 2
+    pc = pairwise_connectivity_after_removal(dg, nodes)
+    return int(total_pairs - pc)
+
+
+def identify_critical_nodes(
+    dg: DrainageGraph,
+    k: int,
+    method: str = "auto",
+    exact_max_combinations: int = 200000,
+) -> CriticalNodeResult:
+    """Identify critical nodes minimizing remaining pairwise connectivity.
+
+    Parameters
+    ----------
+    dg : DrainageGraph
+    k : number of nodes to remove
+    method : {"auto", "exact", "greedy"}
+        - auto: exact when combinatorics are moderate, else greedy.
+    exact_max_combinations : max combinations allowed in exact mode.
+    """
+    n = len(dg.nodes)
+    if n == 0 or k <= 0:
+        return CriticalNodeResult(
+            k=max(0, int(k)),
+            nodes=np.array([], dtype=int),
+            method_used="exact",
+            pairwise_connectivity=0,
+            disconnected_pairs=0,
+            subbasins=0,
+        )
+
+    k = int(min(k, n))
+    total_pairs = n * (n - 1) // 2
+
+    if method not in {"auto", "exact", "greedy"}:
+        raise ValueError("method must be one of: 'auto', 'exact', 'greedy'.")
+
+    if method == "auto":
+        n_comb = int(math.comb(n, k))
+        method_used = "exact" if n_comb <= exact_max_combinations else "greedy"
+    else:
+        method_used = method
+
+    best_nodes: tuple[int, ...] | None = None
+    best_pc = np.inf
+
+    if method_used == "exact":
+        for cand in combinations(range(n), k):
+            pc = pairwise_connectivity_after_removal(dg, cand)
+            if pc < best_pc:
+                best_pc = pc
+                best_nodes = cand
+    else:
+        # greedy maximization of pairwise-connectivity drop
+        selected: list[int] = []
+        current_pc = pairwise_connectivity_after_removal(dg, selected)
+        candidate_set = set(range(n))
+        for _ in range(k):
+            best_node = None
+            best_drop = -1
+            best_next_pc = current_pc
+            for v in sorted(candidate_set):
+                pc = pairwise_connectivity_after_removal(dg, selected + [v])
+                drop = current_pc - pc
+                if drop > best_drop:
+                    best_drop = drop
+                    best_next_pc = pc
+                    best_node = v
+            if best_node is None:
+                break
+            selected.append(best_node)
+            candidate_set.remove(best_node)
+            current_pc = best_next_pc
+        best_nodes = tuple(selected)
+        best_pc = current_pc
+
+    if best_nodes is None:
+        best_nodes = tuple()
+        best_pc = pairwise_connectivity_after_removal(dg, best_nodes)
+
+    subbasins = subbasins_after_removal(dg, best_nodes)
+    disconnected_pairs = int(total_pairs - int(best_pc))
+    return CriticalNodeResult(
+        k=k,
+        nodes=np.array(best_nodes, dtype=int),
+        method_used=method_used,
+        pairwise_connectivity=int(best_pc),
+        disconnected_pairs=disconnected_pairs,
+        subbasins=int(subbasins),
+    )
+
+
+def _powerlaw_slope(k_values: np.ndarray, y_values: np.ndarray) -> float:
+    """Slope of log(y) vs log(k), returning NaN if not enough support."""
+    k = np.asarray(k_values, dtype=float)
+    y = np.asarray(y_values, dtype=float)
+    mask = (k > 0) & (y > 0)
+    if int(mask.sum()) < 2:
+        return float("nan")
+    slope, _ = np.polyfit(np.log(k[mask]), np.log(y[mask]), 1)
+    return float(slope)
+
+
+def critical_fragmentation_curve(
+    dg: DrainageGraph,
+    k_max: int = 10,
+    method: str = "auto",
+    exact_max_combinations: int = 200000,
+    compare_central: bool = True,
+) -> CriticalNodeCurve:
+    """Compute fragmentation curves for critical vs central nodes.
+
+    Returns pairwise-connectivity and sub-basin trajectories vs removed node
+    count k, plus fitted slopes matching the analysis protocol in
+    Sarker et al. (2019): power-law slope for pairwise connectivity and
+    linear slope for sub-basin count.
+    """
+    n = len(dg.nodes)
+    if n == 0:
+        empty = np.array([], dtype=float)
+        return CriticalNodeCurve(
+            k_values=np.array([], dtype=int),
+            critical_nodes=[],
+            central_nodes=[] if compare_central else None,
+            pairwise_connectivity_critical=empty,
+            pairwise_connectivity_central=empty if compare_central else None,
+            subbasins_critical=empty,
+            subbasins_central=empty if compare_central else None,
+            powerlaw_slope_pc_critical=float("nan"),
+            powerlaw_slope_pc_central=float("nan") if compare_central else None,
+            linear_slope_subbasins_critical=float("nan"),
+            linear_slope_subbasins_central=float("nan") if compare_central else None,
+            mean_pc_advantage_critical=float("nan") if compare_central else None,
+        )
+
+    k_max = int(max(1, min(k_max, n)))
+    k_values = np.arange(1, k_max + 1, dtype=int)
+
+    crit_nodes_list: list[np.ndarray] = []
+    pc_crit = np.zeros(k_max, dtype=float)
+    sub_crit = np.zeros(k_max, dtype=float)
+    for i, k in enumerate(k_values):
+        res = identify_critical_nodes(
+            dg, int(k), method=method, exact_max_combinations=exact_max_combinations
+        )
+        crit_nodes_list.append(res.nodes)
+        pc_crit[i] = float(res.pairwise_connectivity)
+        sub_crit[i] = float(res.subbasins)
+
+    pc_cent = None
+    sub_cent = None
+    cent_nodes_list = None
+    slope_pc_cent = None
+    slope_sub_cent = None
+    mean_adv = None
+    if compare_central:
+        bc_rank = most_central_nodes(dg, k_max)
+        cent_nodes_list = []
+        pc_cent = np.zeros(k_max, dtype=float)
+        sub_cent = np.zeros(k_max, dtype=float)
+        for i, k in enumerate(k_values):
+            nodes_k = bc_rank[:k].astype(int)
+            cent_nodes_list.append(nodes_k)
+            pc_cent[i] = float(pairwise_connectivity_after_removal(dg, nodes_k))
+            sub_cent[i] = float(subbasins_after_removal(dg, nodes_k))
+        slope_pc_cent = _powerlaw_slope(k_values, pc_cent)
+        if len(k_values) >= 2:
+            slope_sub_cent = float(np.polyfit(k_values.astype(float), sub_cent, 1)[0])
+        else:
+            slope_sub_cent = float("nan")
+        mean_adv = float(np.mean(pc_cent - pc_crit))
+
+    slope_pc_crit = _powerlaw_slope(k_values, pc_crit)
+    if len(k_values) >= 2:
+        slope_sub_crit = float(np.polyfit(k_values.astype(float), sub_crit, 1)[0])
+    else:
+        slope_sub_crit = float("nan")
+
+    return CriticalNodeCurve(
+        k_values=k_values,
+        critical_nodes=crit_nodes_list,
+        central_nodes=cent_nodes_list,
+        pairwise_connectivity_critical=pc_crit,
+        pairwise_connectivity_central=pc_cent,
+        subbasins_critical=sub_crit,
+        subbasins_central=sub_cent,
+        powerlaw_slope_pc_critical=slope_pc_crit,
+        powerlaw_slope_pc_central=slope_pc_cent,
+        linear_slope_subbasins_critical=slope_sub_crit,
+        linear_slope_subbasins_central=slope_sub_cent,
+        mean_pc_advantage_critical=mean_adv,
+    )

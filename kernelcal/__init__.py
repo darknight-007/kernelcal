@@ -46,6 +46,16 @@ spectral
     every Section 3 claim of the companion paper numerically visible.
     (Paper §3: Propositions 1–3, Corollaries 1–3, Remarks 4, 8, Q6)
 
+blender
+    Blender/bpy integration for spectral digital twins.  Strict separation of
+    concerns: Blender owns geometry and ground truth; kernelcal.geo3d owns all
+    spectral and topological computation.  Modules:
+      terrain_gen      — procedural terrain with controlled β₁ (bpy required)
+      twin_receiver    — synthesized-twin visualiser in Blender (bpy required)
+      q10_pipeline     — Nyström β₁ topology error experiment (pure Python)
+      run_q10_experiment.sh — end-to-end orchestrator (Blender → kernelcal)
+    Note: bpy modules are only importable inside Blender's own Python runtime.
+
 Quick-start
 -----------
 >>> from kernelcal.maxcal import MaxCalSampler
@@ -166,7 +176,7 @@ from .geo3d import (
     vietoris_rips_persistence,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.9.0"
 
 __all__ = [
     # kernel

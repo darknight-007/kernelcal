@@ -199,11 +199,32 @@ class TestCraters:
 from kernelcal.terrain.channels import (
     drainage_network_graph, drainage_graph_laplacian,
     triple_spectral_diagnostic, curl_energy,
+    pairwise_connectivity_after_removal, subbasins_after_removal,
+    betweenness_centrality_undirected, most_central_nodes,
+    group_betweenness_score, identify_critical_nodes,
+    critical_fragmentation_curve,
     abiotic_beta1_channels, topology_budget,
 )
 
 
 class TestChannels:
+    def _simple_tree_graph(self):
+        """Small fixed tree for deterministic critical-node tests."""
+        # 0-1-3, 1-4, 0-2-5
+        from kernelcal.terrain.channels import DrainageGraph
+        nodes = [(i, 0) for i in range(6)]
+        edges = np.array([[0, 1], [0, 2], [1, 3], [1, 4], [2, 5]], dtype=np.int32)
+        return DrainageGraph(
+            nodes=nodes,
+            node_index={rc: i for i, rc in enumerate(nodes)},
+            directed_edges=[(3, 1), (4, 1), (1, 0), (5, 2), (2, 0)],
+            undirected_edges=edges,
+            accumulation=np.ones(6, dtype=np.int32),
+            strahler=np.ones(6, dtype=np.int32),
+            beta0=1,
+            beta1=0,
+        )
+
     def test_drainage_graph_not_empty(self):
         dem = synthetic_channel_dem(24, 24, n_tributaries=3, slope_angle=0.1)
         dg = drainage_network_graph(dem, threshold=4)
@@ -271,6 +292,43 @@ class TestChannels:
         assert diag.fiedler_concentrated is not None
         assert diag.curl_elevated is not None
         assert diag.beta1_anomalous is not None
+
+    def test_pairwise_connectivity_counts_pairs(self):
+        dg = self._simple_tree_graph()
+        # n=6 => total pairs = 15
+        assert pairwise_connectivity_after_removal(dg, []) == 15
+        # remove node 1 => components sizes [3,1,1] => 3 pairs
+        assert pairwise_connectivity_after_removal(dg, [1]) == 3
+
+    def test_critical_node_matches_best_single_deletion(self):
+        dg = self._simple_tree_graph()
+        result = identify_critical_nodes(dg, k=1, method="exact")
+        assert result.k == 1
+        assert result.method_used == "exact"
+        # Nodes 0 or 1 are optimal single deletions on this tree.
+        assert int(result.nodes[0]) in (0, 1)
+        assert result.pairwise_connectivity <= 3
+        assert result.disconnected_pairs == 15 - result.pairwise_connectivity
+
+    def test_group_betweenness_matches_disconnected_pairs(self):
+        dg = self._simple_tree_graph()
+        nodes = np.array([1], dtype=int)
+        gb = group_betweenness_score(dg, nodes)
+        pc = pairwise_connectivity_after_removal(dg, nodes)
+        assert gb == 15 - pc
+
+    def test_critical_fragmentation_curve_monotone(self):
+        dg = self._simple_tree_graph()
+        curve = critical_fragmentation_curve(dg, k_max=3, method="exact", compare_central=True)
+        assert len(curve.k_values) == 3
+        assert np.all(np.diff(curve.pairwise_connectivity_critical) <= 1e-12)
+        # Component count is bounded by surviving nodes and should increase at least once.
+        for k, sb in zip(curve.k_values, curve.subbasins_critical):
+            assert 0 <= sb <= (len(dg.nodes) - int(k))
+        assert np.any(np.diff(curve.subbasins_critical) > 0)
+        assert curve.pairwise_connectivity_central is not None
+        # Critical deletion should not leave more connected pairs than central baseline.
+        assert np.all(curve.pairwise_connectivity_critical <= curve.pairwise_connectivity_central + 1e-12)
 
 
 # ---------------------------------------------------------------------------

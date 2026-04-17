@@ -277,8 +277,8 @@ def fig_global_map(catalog: np.ndarray):
 
     ax.set_xlabel('Longitude  (°)', fontsize=9)
     ax.set_ylabel('Latitude  (°)', fontsize=9)
-    ax.grid(True, color='white', linewidth=0.3, alpha=0.5)
-    ax.set_facecolor('#1a1a2e')
+    ax.grid(True, color='#CCCCCC', linewidth=0.3, alpha=0.5)
+    ax.set_facecolor('#FFFFFF')
     fig.patch.set_facecolor('white')
 
     fig.suptitle(

@@ -1,0 +1,8 @@
+Kernel fluid 20-node experiment summary
+--------------------------------------
+mass_error_max: 0.00000000
+flux10_mean_pre: 0.00000000
+flux14_mean_pre: 0.00001379
+flux10_mean_post: -0.00000000
+flux14_mean_post: 0.00000000
+dissipation_peak: 136.01251314
