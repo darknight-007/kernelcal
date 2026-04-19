@@ -1042,6 +1042,13 @@ Cite the arXiv papers for the framework, **in preparation** manuscripts when cit
 ## Changelog
 
 ### Unreleased
+- **Fixed: Nyström large-mesh coefficient solve in `kernelcal.geo3d.large_mesh`**
+  - Updated `compress_large_mesh_nystrom` to solve spectral coefficients with
+    least-squares (`np.linalg.lstsq`) instead of the orthonormal projection
+    shortcut (`ΦᵀV`), because interpolated Nyström modes are only
+    approximately orthonormal.
+  - Improves reconstruction fidelity when increasing transmitted mode count
+    (`n_modes`), especially for elevation-sensitive terrain meshes.
 - **New: streamable graph codec format (`.kcg`)** in `kernelcal.terrain.graph_codec`
   for compressed graph telemetry.
   - Added binary stream helpers:

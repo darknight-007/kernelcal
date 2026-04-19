@@ -288,6 +288,54 @@ def test_nystrom_serialization_roundtrip():
     assert np.array_equal(c.faces, c2.faces)
 
 
+def test_faropa2_like_nystrom_pipeline_quality_score():
+    """Faropa2-like Nyström pipeline: faces retained, quality score, and better elevation at higher k."""
+    # Build a smooth relief surface with non-trivial elevation.
+    n = 24
+    xs = np.linspace(-1.0, 1.0, n)
+    ys = np.linspace(-1.0, 1.0, n)
+    X, Y = np.meshgrid(xs, ys)
+    Z = (
+        0.6 * np.sin(np.pi * X) * np.cos(np.pi * Y)
+        + 0.3 * np.sin(2.0 * np.pi * X)
+        + 0.1 * (X**2 - Y**2)
+    )
+    v = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1).astype(np.float64)
+
+    faces = []
+    for i in range(n - 1):
+        for j in range(n - 1):
+            a = i * n + j
+            b = a + 1
+            c = a + n
+            d = c + 1
+            faces.append([a, b, c])
+            faces.append([b, d, c])
+    f = np.asarray(faces, dtype=np.int32)
+
+    # Compare low vs. higher mode transmission on the same mesh.
+    c_low = compress_large_mesh_nystrom(v, f, n_modes=8, n_coarse=120, heat_tau=1.0, seed=0)
+    c_high = compress_large_mesh_nystrom(v, f, n_modes=24, n_coarse=180, heat_tau=1.0, seed=0)
+
+    v_low, f_low = decompress_large_mesh(c_low)
+    v_high, f_high = decompress_large_mesh(c_high)
+
+    assert np.array_equal(f_low, f)
+    assert np.array_equal(f_high, f)
+
+    z_rmse_low = float(np.sqrt(np.mean((v_low[:, 2] - v[:, 2]) ** 2)))
+    z_rmse_high = float(np.sqrt(np.mean((v_high[:, 2] - v[:, 2]) ** 2)))
+    assert z_rmse_high <= z_rmse_low
+
+    # Run the current quality score path used in mesh-flow reporting.
+    score = score_compression(c_high, vertices_original=v, coeff_only=False)
+    assert isinstance(score, CompressionScore)
+    assert 0.0 <= score.overall_loss <= 1.0
+    assert score.grade() in {"Excellent", "Good", "Fair", "Poor"}
+    assert score.relative_distortion is not None
+    assert score.rms_vertex_error is not None
+
+
 # ---------------------------------------------------------------------------
 # score_compression (self-introspection) tests
 # ---------------------------------------------------------------------------

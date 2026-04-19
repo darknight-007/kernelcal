@@ -365,7 +365,9 @@ def compress_large_mesh_nystrom(
     # ── 6. Heat-kernel weights + vertex coefficients ──────────────────────
     h = np.exp(-lam_est * float(heat_tau))
     h = np.maximum(h, 1e-12)
-    coeffs = Phi_full.T @ v      # (k, 3)
+    # Phi_full is only approximately orthonormal after Nyström interpolation.
+    # Solve least-squares for coefficients to avoid projection bias.
+    coeffs, *_ = np.linalg.lstsq(Phi_full, v, rcond=None)   # (k, 3)
 
     t_total = time.perf_counter() - t0
     log.debug("[Nyström] Total: %.1fs", t_total)
