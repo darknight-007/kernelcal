@@ -399,7 +399,7 @@ def make_figures(mask: np.ndarray, xy: np.ndarray, diams: np.ndarray, d: dict):
                   fontsize=8.5, fontweight='bold', pad=5)
     fig2.tight_layout()
     out2 = (KCAL_ROOT.parent /
-            'journal-spectral-kernel-biosignature-planetary-surfaces-p4' /
+            'P4-journal-spectral-kernel-biosignature-planetary-surfaces' /
             'figures' / 'fig_phasespace_with_lunar.pdf')
     fig2.savefig(out2, dpi=300)
     out2p = out2.with_suffix('.png')

@@ -55,7 +55,7 @@ with warnings.catch_warnings():
 FIG_DIR   = KCAL_ROOT / 'street_figures'
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 PAPER_FIG = (KCAL_ROOT.parent /
-             'journal-spectral-kernel-biosignature-planetary-surfaces-p4' /
+             'P4-journal-spectral-kernel-biosignature-planetary-surfaces' /
              'figures')
 CACHE_DIR = Path('/tmp/kernelcal_street_cache')
 CACHE_DIR.mkdir(parents=True, exist_ok=True)

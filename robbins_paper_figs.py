@@ -39,7 +39,7 @@ from kernelcal.terrain.diagnostics import spectral_entropy, fixed_point_kernel
 CSV_PATH = Path.home() / 'Downloads' / 'lunar_crater_database_robbins_2018.csv'
 OUT_DIR  = KCAL_ROOT / 'lunar_paper_figures'
 PAPER    = (KCAL_ROOT.parent /
-            'journal-spectral-kernel-biosignature-planetary-surfaces-p4' / 'figures')
+            'P4-journal-spectral-kernel-biosignature-planetary-surfaces' / 'figures')
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 R_MOON  = 1_737_400.0

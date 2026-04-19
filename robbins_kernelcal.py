@@ -53,7 +53,7 @@ DEFAULT_CSV = Path.home() / 'Downloads' / 'lunar_crater_database_robbins_2018.cs
 FIG_DIR     = KCAL_ROOT / 'lunar_figures'
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 PAPER_FIG   = (KCAL_ROOT.parent /
-               'journal-spectral-kernel-biosignature-planetary-surfaces-p4' /
+               'P4-journal-spectral-kernel-biosignature-planetary-surfaces' /
                'figures')
 
 # ── constants ────────────────────────────────────────────────────────────────
@@ -643,7 +643,7 @@ def main():
     fig_phase_space(results)
 
     print(f'\nAll figures → {FIG_DIR}')
-    print('Paper figures → journal-spectral-kernel-biosignature-planetary-surfaces-p4/figures/')
+    print('Paper figures → P4-journal-spectral-kernel-biosignature-planetary-surfaces/figures/')
 
 
 if __name__ == '__main__':

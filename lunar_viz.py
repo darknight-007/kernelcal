@@ -52,7 +52,7 @@ MASK_DIR  = LROC_REPO / 'predicted_masks'
 FIG_DIR   = KCAL_ROOT / 'lunar_figures'
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 PAPER_FIG_DIR = (KCAL_ROOT.parent /
-                 'journal-spectral-kernel-biosignature-planetary-surfaces-p4' /
+                 'P4-journal-spectral-kernel-biosignature-planetary-surfaces' /
                  'figures')
 
 # ── style ───────────────────────────────────────────────────────────────────

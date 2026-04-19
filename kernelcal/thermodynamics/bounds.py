@@ -255,7 +255,10 @@ class PowerMonitor:
             return elapsed * self.cpu_tdp_watts
         times = np.array([s.timestamp for s in self._samples])
         powers = np.array([s.power_watts for s in self._samples])
-        return float(np.trapz(powers, times))
+        # NumPy 2.x renamed np.trapz to np.trapezoid; fall back to np.trapz
+        # when running against older NumPy.
+        trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+        return float(trapz(powers, times))
 
     def mean_power_watts(self) -> float:
         if not self._samples:

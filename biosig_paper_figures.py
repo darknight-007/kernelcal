@@ -8,7 +8,7 @@ Produces white-background, journal-ready figures comparing three empirical syste
   3. Five world cities (active urban planning controller)
 
 Output figures saved to:
-  ../journal-spectral-kernel-biosignature-planetary-surfaces-p4/figures/
+  ../P4-journal-spectral-kernel-biosignature-planetary-surfaces/figures/
 
 Figures:
   fig_controller_phasespace.pdf/.png  — Main: ΔH × Δβ₁/N phase space
@@ -47,7 +47,7 @@ from kernelcal.terrain.diagnostics import (
 )
 
 FIG_DIR = (KCAL_ROOT.parent /
-           'journal-spectral-kernel-biosignature-planetary-surfaces-p4' /
+           'P4-journal-spectral-kernel-biosignature-planetary-surfaces' /
            'figures')
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 

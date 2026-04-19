@@ -52,6 +52,12 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.bandits` | **Decentralised Dynamic-Kernel GP-UCB (DDK-GPUCB):** spatiotemporal bandit simulation with learnable mixture kernels, gossip consensus, and Chebyshev-accelerated mixing |
 | `kernelcal.geo3d` | **Spectral compression for 3D geometry:** point clouds, triangle meshes (DAE/OBJ), and temporal LiDAR sequences. Hodge Laplacian complex (L₀/L₁/L₂), persistent homology (0D/1D), compression ratio bounds, Nyström large-mesh path. **`score_compression()`** self-introspection: four-channel quality report (geometry / spectral / kernel / topology) with composite loss and grade. **`decoder.py`** three-stage receiving pipeline: skeleton reconstruction (Theorem 1 topology guard) + D_m conservation-deficit gate + detail dispatch. **`detail_synthesis.py`** five detail methods: fractal noise (H[h*] → roughness), curl-gated flow textures (E_curl), latent-code scene library, landmark Poisson pinning, D_m octave boost. |
 | `kernelcal.terrain` | **Planetary terrain analysis and topological biosignature detection** (P2, P3, P4). DEM→graph pipeline (D8 flow routing, slope/curvature), crater rim detection and Betti numbers, drainage network graphs (Strahler ordering, max-flow/min-cut), the triple spectral diagnostic for channel detection (Proposition 3, P2), **critical-node fragmentation diagnostics** (group-betweenness critical sets, pairwise-connectivity decay, sub-basin growth), topological biosignature Δβ₁, cross-kernel factorization test, plume spectral entropy biosignature, fixed-point kernel, stability–conservation tradeoff (Route 3), bandwidth-optimal mode selection, observability ratio. **70 tests, stdlib-only (numpy + scipy).** |
+| `kernelcal.core` | Stable compatibility facade for downstream integrations: `FixedPointDetector`, `KernelTrajectory`, `MaxCalSampler` |
+| `kernelcal.navigation` | Kernel-aware autonomy primitives: semantic SLAM kernel tracking, informative path planning, pilot demonstration learning, novelty/stability-aware velocity control |
+| `kernelcal.video` | Depth/LiDAR spectral stream codec with Hilbert-Schmidt novelty tracking and optional ROS2 bridge |
+| `kernelcal.semantic` | Multi-segmenter semantic pipeline (closed-set, panoptic, open-vocab), novelty scoring, and MaxCal active query planning for HITL labeling |
+| `kernelcal.bio` | Sleep-EEG spectral entropy pipeline and stage-contrast diagnostics ("sleep as beam cooling" operationalization) |
+| `kernelcal.urban` | Urban building-graph controller diagnostics for city-scale spectral kernel analyses |
 
 ### Reviewer entry points
 
@@ -704,6 +710,8 @@ kernelcal/
 │   ├── space.py          # HS distance, PSD projection, kernel algebra
 │   ├── trajectory.py     # KernelTrajectory: path length, velocity, interpolation
 │   └── fixed_points.py   # FixedPointDetector: stability score, landscape classifier
+├── core/
+│   └── __init__.py       # Stable facade for long-lived imports
 ├── maxcal/
 │   ├── functional.py     # Path entropy, Lagrange dual, fit_lagrange_multipliers
 │   └── sampler.py        # MaxCalSampler: drop-in for DeepGIS World Sampler
@@ -718,6 +726,16 @@ kernelcal/
 │   └── selector.py       # ModelKernelSelector: MaxCal over SAM/YOLOv8/DINO/...
 ├── prompts/
 │   └── grounding.py      # PromptKernelIterator: fixed-point prompt search
+├── terrain/
+│   ├── dem.py            # DEM → graph, D8 flow, synthetic fixtures
+│   ├── craters.py        # Rim graph + Betti diagnostics
+│   ├── channels.py       # Drainage/channel diagnostics + critical-node routines
+│   ├── biosig.py         # Δβ₁, factorization, plume biosignatures
+│   ├── diagnostics.py    # Fixed-point kernel + stability/conservation diagnostics
+│   └── graph_codec.py    # Graph telemetry codec (.kcg stream format)
+├── control/
+│   ├── care.py           # CARE solvers + Riccati diagnostics
+│   └── analyzer.py       # PlantPhenotypingCAREAnalyzer
 ├── attention/
 │   ├── device.py          # GPU auto-selection (CUDA/MPS/CPU), float16 on GPU
 │   ├── kernel.py          # AttentionKernel: spectral MaxCal on attention matrices
@@ -737,6 +755,24 @@ kernelcal/
 │   ├── procedural_examples.py  # Standard examples runner + CLI
 │   ├── channel_image.py   # (dormant) Image-to-graph extraction pipeline
 │   └── pipeline.py        # (dormant) Image-to-spectral diagnostics pipeline
+├── semantic/
+│   ├── registry.py        # Class ontology + prototypes + motion tags
+│   ├── segmenters.py      # Segmenter adapters and stubs
+│   ├── ensemble.py        # Three-layer arbitration and status assignment
+│   ├── novelty.py         # Multi-signal novelty fusion
+│   └── active_query.py    # MaxCal query planning under HITL budgets
+├── bio/
+│   └── sleep_eeg.py       # Sleep-EEG kernel entropy + stage contrast
+├── navigation/
+│   ├── slam.py            # SemanticSLAMKernelTracker + descriptor kernels
+│   ├── planner.py         # InformativePathPlanner
+│   ├── pilot.py           # Human pilot demonstration learner
+│   └── velocity.py        # TerrainKernelVelocityController
+├── video/
+│   ├── depth_stream.py    # Depth/LiDAR frame codec + novelty trajectory
+│   └── ros_bridge.py      # Optional ROS2 node and local demo
+├── urban/
+│   └── city_graph.py      # City graph extraction + controller diagnostics
 ├── fluid/                 # NEW v0.3.0
 │   ├── dynamics.py        # FluidKernelDynamics: MaxCal-governed flow learning
 │   └── experiments.py     # Experiment runners for fluid kernel trajectories
@@ -751,6 +787,11 @@ kernelcal/
 │   ├── large_mesh.py      # LargeMeshCompressed, Nyström extension, LOBPCG, load_obj, compress_obj
 │   ├── decoder.py         # NEW v0.9.0 — SpectralTelemetry, decode(), triage_detail_level(), D_m gate
 │   └── detail_synthesis.py # NEW v0.9.0 — synthesize(); fractal noise, curl textures, landmark pinning
+├── blender/
+│   ├── terrain_gen.py      # Blender: procedural terrain with known β₁
+│   ├── q10_pipeline.py     # kernelcal: Nyström β₁ verification
+│   ├── run_q10_experiment.sh # Orchestrator: Blender headless → kernelcal
+│   └── twin_receiver.py    # Blender: synthesized twin visualization
 └── bandits/               # NEW v0.3.0 — DDK-GPUCB simulation suite
     ├── field.py           # SpatiotemporalField: (x,t) arms, SE×Per vs SE regions
     ├── kernels.py         # AnisotropicSEKernel, SEPeriodicKernel, MixtureKernel
@@ -774,13 +815,6 @@ ros2_ws/
     ├── demo_bloom_maxcal.py     # Standalone demo (no ROS2 needed)
     ├── launch/bloom_sim.launch.py
     └── config/default.yaml
-
-kernelcal/blender/               # NEW v0.9.0 — Blender/kernelcal integration subpackage
-├── __init__.py                  # Package marker; no bpy import at module level
-├── terrain_gen.py               # Blender: procedural terrain with known β₁, OBJ + JSON export
-├── q10_pipeline.py              # kernelcal: Nyström β₁ vs. ground truth, Q10 pass/fail
-├── run_q10_experiment.sh        # Orchestrator: headless Blender → kernelcal → report
-└── twin_receiver.py             # Blender: load synthesized twin NPZ, shader nodes, export
 ```
 
 ### Energy monitoring
