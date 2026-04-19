@@ -1041,6 +1041,43 @@ Cite the arXiv papers for the framework, **in preparation** manuscripts when cit
 
 ## Changelog
 
+### Unreleased
+- **New: streamable graph codec format (`.kcg`)** in `kernelcal.terrain.graph_codec`
+  for compressed graph telemetry.
+  - Added binary stream helpers:
+    `packet_to_stream_bytes`, `packet_from_stream_bytes`,
+    `write_packet_stream`, `read_packet_stream`,
+    `write_packet_stream_file`, `read_packet_stream_file`
+  - Format is Python-friendly and frame-streamable (typed array records with
+    explicit shape metadata), intended for transport/receiver tests.
+- **Updated: graph codec demos and inspection workflows**
+  - `run_graph_codec_demo.py` now reports both NPZ and KCG payload sizes,
+    verifies lossless decode on both paths, and writes `.kcg` files alongside plots.
+  - Reconstructed-graph figure now includes an edge-audit panel
+    (shared/sender-only/decoded-only) and numeric mismatch diagnostics for
+    edge set, weights, and node positions.
+  - Added `run_rivgraph_kernelcal_integration_batch.py` to execute terrain tests,
+    RivGraph analyses, and codec workflows for synthetic/chain/Brahmaputra/
+    Meandering/Colville with summary output.
+- **Fixed: dangling root exports in `kernelcal.__all__`**
+  - Added lazy root-level resolution for fluid API symbols (`FluidGraph`,
+    `simulate_kernel_fluid`, etc.) so `from kernelcal import *` no longer fails.
+  - Removed duplicate `CompressedSpectralKernel` entry in root `__all__`.
+- **New: `sigma_m_p8.py`** — Q19 numerical closure: evaluates the dual Riccati
+  conjecture `σ_m = 1/2` from Note 62b §4 / Note 62c §3 on the canonical `P_8`
+  Gaussian-MI fixed point (`σ² = 1`, `μ_2 = 2`, `w_l = 1`).  Computes the
+  log-coord Hessian at `h*`, solves the primal LQR and dual LQE CAREs under the
+  plant-phenotyping convention (`Q = ½ I`, `B = C = I`, `R = V = R_ctrl_scale·I`),
+  reports `p_m`, `σ_m`, and `‖PΣ − I‖_F`, and scans `R_ctrl_scale` for the
+  operational LQR–LQE duality point.  The empirical answer (`p_m = σ_m ≈ 0.5834`
+  uniformly across all 8 modes; duality `R* ≈ 4.22`) closes Q19 with a
+  quantified 17 % deviation from the conjectured `σ_m = 1/2` under the
+  symmetric self-dual setup, locating the Note-62b duality point at the scale
+  where `‖PΣ − I‖_F < 0.1`
+- **Tests added** — `tests/test_sigma_m_p8.py`: 12 regression tests locking in
+  the P_8 fixed-point value, log-coord Hessian, Riccati gains, duality-scale
+  scan, and the Cowan–Farquhar calibrated source behavior
+
 ### v0.9.2 (April 2026)
 - **New: `kernelcal.control`** — CARE (Continuous Algebraic Riccati Equation) solvers
   and MaxCal-optimal controller identification for kernel-space dynamics (plant-phenotyping

@@ -298,7 +298,6 @@ __all__ = [
     "adjacency_to_laplacian",
     "CompressedSpectralKernel",
     "CompressedMeshGeometry",
-    "CompressedSpectralKernel",
     "CompressionBounds",
     "HodgeSpectralBasis",
     "PersistencePair",
@@ -342,6 +341,21 @@ def __getattr__(name: str):
     if name == "run_twenty_node_experiment":
         from .fluid.experiments import run_twenty_node_experiment
         return run_twenty_node_experiment
+    # Fluid API is exposed at package root but loaded lazily to avoid
+    # importing optional/scientific dependencies on base `import kernelcal`.
+    if name in {
+        "FluidGraph",
+        "PotentialLandscape",
+        "FluidSimulationConfig",
+        "FluidSimulationResult",
+        "ring_distance",
+        "gaussian_bump_on_ring",
+        "make_twenty_node_reference_landscape",
+        "simulate_kernel_fluid",
+        "save_timeseries_csv",
+    }:
+        from . import fluid as _fl
+        return getattr(_fl, name)
     # Backward-compatible access to dormant image pipeline symbols.
     if name in {
         "ChannelEdge",
