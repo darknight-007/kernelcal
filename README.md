@@ -195,19 +195,25 @@ print(f"log₁₀(R/İself) = {obs['log10_ratio']:.1f}  regime: {obs['regime']}"
 ### Drone DEM adaptive mapping (`drone_dem_betti_adaptive_experiment.py`)
 
 Realtime drone-style exploration over DEM tiles with a square camera footprint
-derived from altitude/FOV, Betti-aware waypoint selection, and optional
+derived from altitude/FOV, direct delta-Betti waypoint selection, and optional
 RivGraph-based channel extraction.
 
 Key capabilities:
 
 - DEM input via `--dem-tiff` or `--dem-npy`
 - Geographic crop via DeepGIS-friendly `--bbox-lonlat="lon_min,lat_min,lon_max,lat_max"`
-- Adaptive objective on per-capture topology (`beta0`, `beta1`) + unseen area + relief
+- Direct objective on per-capture topology (`delta beta1`, `beta1`) + unseen area + relief
 - Live matplotlib mode (`--realtime`) and export animation (`.gif`/`.mp4`)
-- Exploration graph rendering (temporal + proximity edges)
+- Exploration graph rendering (temporal + proximity edges), with legends
+- Per-step local diagnostics:
+  - DEM inside current FOV
+  - extracted stream mask
+  - local channel graph overlaid on DEM and mask panels (trunk/branch edges + nodes)
 - Channel extraction backend switch:
   - `--channel-extractor simple` (D8 + accumulation mask + binary Betti)
   - `--channel-extractor rivgraph` (mask -> RivGraph skeleton -> links/nodes -> graph Betti)
+- Frontier/hotspot pursuit controls:
+  - `--w-hotspot`, `--w-momentum`, `--revisit-penalty`, `--stagnation-patience`
 
 Phoenix/Tonto example (HydroSHEDS 3 arc-second):
 
@@ -221,6 +227,11 @@ python3 drone_dem_betti_adaptive_experiment.py \
     --altitude-m 8000 \
     --fov-deg 60 \
     --steps 200 \
+    --w-beta1 3.0 \
+    --w-hotspot 1.8 \
+    --w-momentum 0.45 \
+    --revisit-penalty 0.8 \
+    --stagnation-patience 8 \
     --realtime \
     --realtime-pause-s 0.03 \
     --realtime-block \
