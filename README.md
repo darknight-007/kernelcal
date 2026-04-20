@@ -202,21 +202,36 @@ Key capabilities:
 
 - DEM input via `--dem-tiff` or `--dem-npy`
 - Geographic crop via DeepGIS-friendly `--bbox-lonlat="lon_min,lat_min,lon_max,lat_max"`
-- Direct objective on per-capture topology (`delta beta1`, `beta1`) + unseen area + relief
+- Direct objective on per-capture topology (`delta beta1`, `beta1`, Fiedler) + unseen area + relief
 - Live matplotlib mode (`--realtime`) and export animation (`.gif`/`.mp4`)
 - Exploration graph rendering (temporal + proximity edges), with legends
 - Per-step local diagnostics:
   - DEM inside current FOV
   - extracted stream mask
-  - local channel graph overlaid on DEM and mask panels (trunk/branch edges + nodes)
+  - local channel graph overlaid on DEM and mask panels, with **continuous graph
+    sections colored by connected component** (`tab20` colormap), plus
+    component count shown in the panel title
 - Channel extraction backend switch:
   - `--channel-extractor simple` (D8 + accumulation mask + binary Betti)
   - `--channel-extractor rivgraph` (mask -> RivGraph skeleton -> links/nodes -> graph Betti)
 - Frontier/hotspot pursuit controls:
   - `--w-hotspot`, `--w-momentum`, `--revisit-penalty`, `--stagnation-patience`
+- Fiedler (algebraic connectivity, normalized Laplacian `λ₂` on the largest
+  connected component) as a first-class signal:
+  - reported in titles, CSV, and topology history line
+  - weighted in the planner via `--w-fiedler` (default `1.0`)
 - FOV overlap control between consecutive captures:
   - `--target-overlap` (default `0.5`)
   - `--overlap-penalty` (higher value enforces overlap target more strongly)
+- **Stream mask / graph connectivity controls** (default off; higher values
+  produce fewer, larger, more tree-like components):
+  - `--mask-close-px N` — morphological closing iterations on the stream mask
+    (bridges small gaps; primary fix for fragmented β₀). Affects β₀/β₁/Fiedler.
+  - `--mask-dilate-px N` — dilation applied after closing (fuses diagonal arms
+    during skeletonization; most effective in the `rivgraph` pipeline).
+  - `--bridge-endpoints-px D` — post-graph union-find stitch of nodes from
+    different components within `D` pixels; unifies rendered CC coloring
+    without re-running Betti.
 
 Phoenix/Tonto example (HydroSHEDS 3 arc-second):
 
@@ -243,7 +258,7 @@ python3 drone_dem_betti_adaptive_experiment.py \
     --output-dir "datasets/hydroshed-dem/drone_betti_realtime"
 ```
 
-RivGraph extractor mode:
+RivGraph extractor mode with mask closing / endpoint bridging for more connected trees:
 
 ```bash
 python3 drone_dem_betti_adaptive_experiment.py \
@@ -257,10 +272,24 @@ python3 drone_dem_betti_adaptive_experiment.py \
     --channel-extractor rivgraph \
     --rivgraph-prune-dangling \
     --rivgraph-repo /absolute/path/to/RivGraph \
+    --mask-close-px 2 \
+    --mask-dilate-px 1 \
+    --bridge-endpoints-px 3.0 \
     --target-overlap 0.5 \
     --overlap-penalty 1.2 \
+    --w-fiedler 1.0 \
     --output-dir "datasets/hydroshed-dem/drone_betti_rivgraph"
 ```
+
+Tuning for more/fewer connected components:
+
+- Highly fragmented (β₀ large, Fiedler ~ 0): raise `--mask-close-px` first (try
+  `1 → 2 → 3`). Diminishing returns above ~5.
+- Rivgraph skeleton still breaks on diagonals: add `--mask-dilate-px 1` (or 2).
+- Mask looks fine but the render still shows orphan arms: add
+  `--bridge-endpoints-px 3.0` (tune 2–6 px).
+- Over-closing will fill small basins and inflate β₁ (fake holes); back off if
+  β₁ spikes without matching physical cycles.
 
 Outputs are written under `--output-dir`:
 

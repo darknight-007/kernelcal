@@ -29,11 +29,32 @@ import sys
 
 import numpy as np
 from scipy import ndimage
+from scipy import sparse
+from scipy.sparse import csgraph
+from scipy.sparse.linalg import eigsh
 import matplotlib.pyplot as plt
 from matplotlib import animation as mpl_animation
 from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
+from matplotlib import colormaps as mpl_colormaps
+
+
+_CC_CMAP = mpl_colormaps.get_cmap("tab20")
+
+
+def _cc_colors_for_labels(labels: np.ndarray) -> np.ndarray:
+    """Map integer CC labels to cycling RGBA colors (unknown -> gray)."""
+    if labels.size == 0:
+        return np.empty((0, 4), dtype=float)
+    lab = np.asarray(labels, dtype=int)
+    n = int(_CC_CMAP.N)
+    idx = np.mod(np.maximum(lab, 0), n) / float(max(1, n - 1))
+    rgba = _CC_CMAP(idx)
+    unknown = lab < 0
+    if np.any(unknown):
+        rgba[unknown] = (0.6, 0.6, 0.6, 1.0)
+    return rgba
 
 
 _D8_OFFSETS = np.array(
@@ -76,6 +97,7 @@ class CaptureRecord:
     col: int
     beta0: int
     beta1: int
+    fiedler: float
     stream_fraction: float
     unseen_fraction: float
     score: float
@@ -365,8 +387,21 @@ def flow_accumulation(fdir: np.ndarray) -> np.ndarray:
     return acc
 
 
-def stream_mask_from_patch(patch_dem: np.ndarray, resolution_m: float, percentile: float) -> np.ndarray:
-    """Infer stream-like binary mask from local flow accumulation."""
+def stream_mask_from_patch(
+    patch_dem: np.ndarray,
+    resolution_m: float,
+    percentile: float,
+    *,
+    close_iters: int = 0,
+    dilate_iters: int = 0,
+) -> np.ndarray:
+    """Infer stream-like binary mask from local flow accumulation.
+
+    close_iters: morphological closing iterations (bridges small gaps).
+    dilate_iters: morphological dilation iterations applied after closing
+        (thickens channels so skeletonization fuses nearby arms).
+    Both use a 3x3 structuring element (8-connectivity).
+    """
     if patch_dem.size == 0:
         return np.zeros_like(patch_dem, dtype=bool)
     valid = np.isfinite(patch_dem)
@@ -379,7 +414,12 @@ def stream_mask_from_patch(patch_dem: np.ndarray, resolution_m: float, percentil
     fdir = d8_flow_direction(work, resolution_m=resolution_m)
     acc = flow_accumulation(fdir).astype(float)
     thr = np.percentile(acc, percentile)
-    return (acc >= max(2.0, thr)) & valid
+    mask = (acc >= max(2.0, thr)) & valid
+    if int(close_iters) > 0:
+        mask = ndimage.binary_closing(mask, structure=np.ones((3, 3), dtype=bool), iterations=int(close_iters))
+    if int(dilate_iters) > 0:
+        mask = ndimage.binary_dilation(mask, structure=np.ones((3, 3), dtype=bool), iterations=int(dilate_iters))
+    return mask & valid
 
 
 def betti_numbers_binary(mask: np.ndarray) -> tuple[int, int]:
@@ -447,6 +487,144 @@ def _betti_from_rivgraph_links_nodes(links: dict, nodes: dict) -> tuple[int, int
     return int(beta0), int(beta1)
 
 
+def _fiedler_from_graph(
+    n_nodes: int,
+    edges: list[tuple[int, int]],
+    *,
+    normalized: bool = True,
+    mode: str = "largest_cc",
+) -> float:
+    """Algebraic connectivity (2nd-smallest Laplacian eigenvalue).
+
+    Uses the normalized Laplacian by default so values live in [0, 2]
+    independent of graph size, which makes cross-patch comparison meaningful.
+
+    mode:
+      - "strict"       : returns 0.0 if the full graph is disconnected
+      - "largest_cc"   : returns lambda_2 of the largest connected component
+                         (the standard convention for fragmented channel graphs)
+    """
+    m = int(n_nodes)
+    if m <= 1:
+        return 0.0
+    if len(edges) == 0:
+        return 0.0
+
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    for a, b in edges:
+        ai, bi = int(a), int(b)
+        if ai == bi:
+            continue
+        if not (0 <= ai < m and 0 <= bi < m):
+            continue
+        rows.extend([ai, bi])
+        cols.extend([bi, ai])
+        data.extend([1.0, 1.0])
+    if len(data) == 0:
+        return 0.0
+
+    adj = sparse.coo_matrix((data, (rows, cols)), shape=(m, m)).tocsr()
+    n_comp, labels = csgraph.connected_components(adj, directed=False)
+
+    if n_comp > 1:
+        if mode != "largest_cc":
+            return 0.0
+        counts = np.bincount(labels, minlength=n_comp)
+        biggest = int(np.argmax(counts))
+        keep = np.where(labels == biggest)[0]
+        if keep.size <= 1:
+            return 0.0
+        remap = -np.ones(m, dtype=np.int64)
+        remap[keep] = np.arange(keep.size, dtype=np.int64)
+        sub_rows = remap[np.asarray(rows, dtype=np.int64)]
+        sub_cols = remap[np.asarray(cols, dtype=np.int64)]
+        mask = (sub_rows >= 0) & (sub_cols >= 0)
+        sub_rows = sub_rows[mask]
+        sub_cols = sub_cols[mask]
+        sub_data = np.asarray(data, dtype=float)[mask]
+        adj = sparse.coo_matrix(
+            (sub_data, (sub_rows, sub_cols)),
+            shape=(int(keep.size), int(keep.size)),
+        ).tocsr()
+        m = int(keep.size)
+
+    lap = csgraph.laplacian(adj, normed=bool(normalized))
+
+    def _dense_lambda2() -> float:
+        vals = np.linalg.eigvalsh(np.asarray(lap.toarray(), dtype=float))
+        vals = np.sort(np.real(vals))
+        return float(max(0.0, vals[1])) if vals.size >= 2 else 0.0
+
+    if m <= 4:
+        return _dense_lambda2()
+
+    try:
+        vals = eigsh(lap.astype(float), k=2, which="SA", return_eigenvectors=False)
+        vals = np.sort(np.real(vals))
+        lam2 = float(max(0.0, vals[1])) if vals.size >= 2 else 0.0
+        if lam2 > 0.0:
+            return lam2
+    except Exception:
+        pass
+    return _dense_lambda2()
+
+
+def _fiedler_from_rivgraph(links: dict, nodes: dict) -> float:
+    """Fiedler value from a RivGraph links/nodes graph, with safe ID remapping.
+
+    RivGraph node IDs are not guaranteed to be 0..n-1. We remap them here
+    so the Fiedler routine sees a clean contiguous graph.
+    """
+    node_ids = list(nodes.get("id", []))
+    if len(node_ids) == 0:
+        node_ids = list(range(len(nodes.get("idx", []))))
+    id_map = {int(nid): k for k, nid in enumerate(node_ids)}
+    m = len(id_map)
+    if m <= 1:
+        return 0.0
+    edges: set[tuple[int, int]] = set()
+    for conn in links.get("conn", []):
+        if conn is None or len(conn) != 2:
+            continue
+        a, b = int(conn[0]), int(conn[1])
+        if a == b or a not in id_map or b not in id_map:
+            continue
+        i, j = id_map[a], id_map[b]
+        if i == j:
+            continue
+        edges.add((i, j) if i < j else (j, i))
+    return _fiedler_from_graph(m, sorted(edges), normalized=True)
+
+
+def _mask_graph_edge_list(mask: np.ndarray) -> tuple[int, list[tuple[int, int]]]:
+    """Convert foreground mask to an undirected 8-neighbor graph."""
+    m = np.asarray(mask, dtype=bool)
+    rows, cols = np.where(m)
+    n = int(rows.size)
+    if n == 0:
+        return 0, []
+    id_map = -np.ones(m.shape, dtype=np.int64)
+    id_map[rows, cols] = np.arange(n, dtype=np.int64)
+
+    neigh = [(0, 1), (1, 0), (1, 1), (1, -1)]
+    nrows, ncols = m.shape
+    edges: list[tuple[int, int]] = []
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        i = int(id_map[r, c])
+        for dr, dc in neigh:
+            rr, cc = r + dr, c + dc
+            if 0 <= rr < nrows and 0 <= cc < ncols and m[rr, cc]:
+                j = int(id_map[rr, cc])
+                if i != j:
+                    a, b = (i, j) if i < j else (j, i)
+                    edges.append((a, b))
+    if len(edges) == 0:
+        return n, []
+    return n, sorted(set(edges))
+
+
 _RIVGRAPH_CACHE: dict[str, object] = {}
 
 
@@ -483,17 +661,24 @@ def patch_channel_metrics(
     percentile: float,
     extractor: str,
     rivgraph_prune_dangling: bool,
-) -> tuple[int, int, float]:
-    """Compute (beta0, beta1, stream_fraction) from a DEM patch."""
+    *,
+    mask_close_px: int = 0,
+    mask_dilate_px: int = 0,
+) -> tuple[int, int, float, float]:
+    """Compute (beta0, beta1, stream_fraction, fiedler) from a DEM patch."""
     smask = stream_mask_from_patch(
         patch_dem,
         resolution_m=resolution_m,
         percentile=percentile,
+        close_iters=int(mask_close_px),
+        dilate_iters=int(mask_dilate_px),
     )
     stream_frac = float(np.mean(smask))
     if extractor == "simple":
         beta0, beta1 = betti_numbers_binary(smask)
-        return beta0, beta1, stream_frac
+        n_nodes, edge_list = _mask_graph_edge_list(smask)
+        fiedler = _fiedler_from_graph(n_nodes, edge_list)
+        return beta0, beta1, stream_frac, fiedler
 
     # RivGraph path: mask -> skeleton -> links/nodes -> graph Betti.
     m2g, lnu = _load_rivgraph_modules()
@@ -508,9 +693,91 @@ def patch_channel_metrics(
             for lid in dangling:
                 links, nodes = lnu.delete_link(links, nodes, lid)
         beta0, beta1 = _betti_from_rivgraph_links_nodes(links, nodes)
+        fiedler = _fiedler_from_rivgraph(links, nodes)
     except Exception:
-        beta0, beta1 = 0, 0
-    return beta0, beta1, stream_frac
+        beta0, beta1, fiedler = 0, 0, 0.0
+    return beta0, beta1, stream_frac, fiedler
+
+
+class _UnionFind:
+    """Minimal union-find over integer labels."""
+
+    def __init__(self, labels: np.ndarray) -> None:
+        self.parent: dict[int, int] = {int(x): int(x) for x in labels.tolist()}
+
+    def add(self, x: int) -> None:
+        x = int(x)
+        if x not in self.parent:
+            self.parent[x] = x
+
+    def find(self, x: int) -> int:
+        x = int(x)
+        while self.parent.get(x, x) != x:
+            p = self.parent[x]
+            self.parent[x] = self.parent.get(p, p)
+            x = self.parent[x]
+        return x
+
+    def union(self, a: int, b: int) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[ra] = rb
+
+
+def _bridge_components(
+    segments: list[np.ndarray],
+    segment_cc: np.ndarray,
+    node_cols: np.ndarray,
+    node_rows: np.ndarray,
+    node_cc: np.ndarray,
+    bridge_px: float,
+) -> tuple[list[np.ndarray], np.ndarray, np.ndarray]:
+    """Merge distinct CCs whose nodes come within `bridge_px` pixels.
+
+    Adds a straight-line bridging segment for each merged pair and rewrites
+    segment_cc / node_cc to use canonical (union-find root) labels.
+    """
+    if bridge_px <= 0.0 or node_cc.size == 0:
+        return segments, segment_cc.copy(), node_cc.copy()
+
+    try:
+        from scipy.spatial import cKDTree  # local import to keep top imports tight
+    except Exception:
+        return segments, segment_cc.copy(), node_cc.copy()
+
+    pts = np.column_stack((np.asarray(node_cols, dtype=float), np.asarray(node_rows, dtype=float)))
+    if pts.shape[0] < 2:
+        return segments, segment_cc.copy(), node_cc.copy()
+
+    uf = _UnionFind(np.unique(np.concatenate([node_cc, segment_cc])).astype(int))
+    tree = cKDTree(pts)
+    pairs = tree.query_pairs(r=float(bridge_px))
+
+    bridging_segments: list[np.ndarray] = []
+    bridging_labels: list[int] = []
+    merged: set[tuple[int, int]] = set()
+    for i, j in pairs:
+        ci, cj = int(node_cc[i]), int(node_cc[j])
+        if ci < 0 or cj < 0 or ci == cj:
+            continue
+        ri, rj = uf.find(ci), uf.find(cj)
+        if ri == rj:
+            continue
+        key = (ri, rj) if ri < rj else (rj, ri)
+        if key in merged:
+            continue
+        merged.add(key)
+        uf.union(ci, cj)
+        seg = np.array([[pts[i, 0], pts[i, 1]], [pts[j, 0], pts[j, 1]]], dtype=float)
+        bridging_segments.append(seg)
+        bridging_labels.append(uf.find(ci))
+
+    new_node_cc = np.array([uf.find(int(x)) for x in node_cc.tolist()], dtype=int)
+    new_seg_cc = np.array([uf.find(int(x)) for x in segment_cc.tolist()], dtype=int)
+    if bridging_segments:
+        segments = list(segments) + bridging_segments
+        new_seg_cc = np.concatenate([new_seg_cc, np.asarray(bridging_labels, dtype=int)])
+    return segments, new_seg_cc, new_node_cc
 
 
 def _mask_graph_segments(
@@ -518,58 +785,50 @@ def _mask_graph_segments(
     *,
     max_edges: int = 4000,
     max_nodes: int = 2500,
-) -> tuple[list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
+) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build a lightweight pixel-graph visualization from a binary mask.
 
     Returns:
-      - trunk-like segments (non-junction edges),
-      - branch/junction segments,
-      - node rows,
-      - node cols.
+      - segments (flat list of XY line segments),
+      - segment_cc (connected-component label per segment),
+      - node_rows,
+      - node_cols,
+      - node_cc (connected-component label per node).
     """
     m = np.asarray(mask, dtype=bool)
     rows, cols = np.where(m)
     if rows.size == 0:
-        return [], [], np.array([], dtype=float), np.array([], dtype=float)
+        return [], np.array([], dtype=int), np.array([], dtype=float), np.array([], dtype=float), np.array([], dtype=int)
+
+    # 8-connected CC labels of the foreground mask.
+    cc_struct = np.ones((3, 3), dtype=np.int8)
+    cc_labels, _ = ndimage.label(m, structure=cc_struct)
 
     if rows.size > max_nodes:
         sel = np.linspace(0, rows.size - 1, max_nodes, dtype=int)
         rows_show = rows[sel].astype(float)
         cols_show = cols[sel].astype(float)
+        node_cc = cc_labels[rows[sel], cols[sel]].astype(int)
     else:
         rows_show = rows.astype(float)
         cols_show = cols.astype(float)
+        node_cc = cc_labels[rows, cols].astype(int)
 
-    degrees: dict[tuple[int, int], int] = {}
-    for r, c in zip(rows.tolist(), cols.tolist()):
-        degrees[(r, c)] = 0
-
-    trunk: list[np.ndarray] = []
-    branch: list[np.ndarray] = []
-    # 8-neighbour undirected edges, emitted once.
+    segments: list[np.ndarray] = []
+    segment_cc: list[int] = []
     neigh = [(0, 1), (1, 0), (1, 1), (1, -1)]
     nrows, ncols = m.shape
     for r, c in zip(rows.tolist(), cols.tolist()):
-        for dr, dc in neigh:
-            rr, cc = r + dr, c + dc
-            if 0 <= rr < nrows and 0 <= cc < ncols and m[rr, cc]:
-                degrees[(r, c)] = degrees.get((r, c), 0) + 1
-                degrees[(rr, cc)] = degrees.get((rr, cc), 0) + 1
-
-    edge_count = 0
-    for r, c in zip(rows.tolist(), cols.tolist()):
+        lab = int(cc_labels[r, c])
         for dr, dc in neigh:
             rr, cc = r + dr, c + dc
             if 0 <= rr < nrows and 0 <= cc < ncols and m[rr, cc]:
                 seg = np.array([[float(c), float(r)], [float(cc), float(rr)]], dtype=float)
-                if degrees.get((r, c), 0) >= 3 or degrees.get((rr, cc), 0) >= 3:
-                    branch.append(seg)
-                else:
-                    trunk.append(seg)
-                edge_count += 1
-                if edge_count >= max_edges:
-                    return trunk, branch, rows_show, cols_show
-    return trunk, branch, rows_show, cols_show
+                segments.append(seg)
+                segment_cc.append(lab)
+                if len(segments) >= max_edges:
+                    return segments, np.asarray(segment_cc, dtype=int), rows_show, cols_show, node_cc
+    return segments, np.asarray(segment_cc, dtype=int), rows_show, cols_show, node_cc
 
 
 def patch_channel_observation(
@@ -578,12 +837,18 @@ def patch_channel_observation(
     percentile: float,
     extractor: str,
     rivgraph_prune_dangling: bool,
+    *,
+    mask_close_px: int = 0,
+    mask_dilate_px: int = 0,
+    bridge_endpoints_px: float = 0.0,
 ) -> dict[str, object]:
     """Per-patch channel extraction outputs for visualization and scoring."""
     smask = stream_mask_from_patch(
         patch_dem,
         resolution_m=resolution_m,
         percentile=percentile,
+        close_iters=int(mask_close_px),
+        dilate_iters=int(mask_dilate_px),
     )
     stream_frac = float(np.mean(smask))
     if extractor == "rivgraph":
@@ -599,57 +864,106 @@ def patch_channel_observation(
                 for lid in dangling:
                     links, nodes = lnu.delete_link(links, nodes, lid)
             beta0, beta1 = _betti_from_rivgraph_links_nodes(links, nodes)
-            node_deg: dict[int, int] = {}
-            for nid, conn in zip(nodes.get("id", []), nodes.get("conn", [])):
-                node_deg[int(nid)] = int(len(conn))
-            segs_trunk: list[np.ndarray] = []
-            segs_branch: list[np.ndarray] = []
+            fiedler = _fiedler_from_rivgraph(links, nodes)
+
+            node_ids = list(nodes.get("id", []))
+            if len(node_ids) == 0:
+                node_ids = list(range(len(nodes.get("idx", []))))
+            id_map = {int(nid): k for k, nid in enumerate(node_ids)}
+            n_nodes_g = len(id_map)
+
+            # Adjacency for CC labeling.
+            rr_adj: list[int] = []
+            cc_adj: list[int] = []
+            for conn in links.get("conn", []):
+                if conn is None or len(conn) != 2:
+                    continue
+                a, b = int(conn[0]), int(conn[1])
+                if a == b or a not in id_map or b not in id_map:
+                    continue
+                i, j = id_map[a], id_map[b]
+                rr_adj.extend([i, j])
+                cc_adj.extend([j, i])
+            if n_nodes_g > 0:
+                if rr_adj:
+                    adj = sparse.coo_matrix(
+                        (np.ones(len(rr_adj), dtype=float), (rr_adj, cc_adj)),
+                        shape=(n_nodes_g, n_nodes_g),
+                    ).tocsr()
+                    _, cc_labels_nodes = csgraph.connected_components(adj, directed=False)
+                else:
+                    cc_labels_nodes = np.arange(n_nodes_g, dtype=int)
+            else:
+                cc_labels_nodes = np.array([], dtype=int)
+
+            segments: list[np.ndarray] = []
+            segment_cc: list[int] = []
             for conn, lidcs in zip(links.get("conn", []), links.get("idx", [])):
                 pix = np.asarray(list(lidcs), dtype=np.int64)
                 if pix.size < 2:
                     continue
                 rc = np.unravel_index(pix, smask.shape)
                 seg = np.column_stack((rc[1].astype(float), rc[0].astype(float)))
-                is_branch = False
-                if conn is not None and len(conn) == 2:
-                    a, b = int(conn[0]), int(conn[1])
-                    is_branch = node_deg.get(a, 0) >= 3 or node_deg.get(b, 0) >= 3
-                if is_branch:
-                    segs_branch.append(seg)
-                else:
-                    segs_trunk.append(seg)
+                lab = -1
+                if conn is not None and len(conn) >= 1:
+                    a = int(conn[0])
+                    if a in id_map:
+                        lab = int(cc_labels_nodes[id_map[a]])
+                segments.append(seg)
+                segment_cc.append(lab)
+
             nrows, ncols = smask.shape
             node_r = np.zeros(len(nodes.get("idx", [])), dtype=float)
             node_c = np.zeros(len(nodes.get("idx", [])), dtype=float)
+            node_cc = np.full(len(nodes.get("idx", [])), -1, dtype=int)
             for i, pix in enumerate(nodes.get("idx", [])):
                 r, c = np.unravel_index(int(pix), (nrows, ncols))
                 node_r[i] = float(r)
                 node_c[i] = float(c)
+                nid = int(node_ids[i]) if i < len(node_ids) else i
+                if nid in id_map:
+                    node_cc[i] = int(cc_labels_nodes[id_map[nid]])
+
+            seg_cc_arr = np.asarray(segment_cc, dtype=int)
+            if float(bridge_endpoints_px) > 0.0:
+                segments, seg_cc_arr, node_cc = _bridge_components(
+                    segments, seg_cc_arr, node_c, node_r, node_cc, float(bridge_endpoints_px)
+                )
             return {
                 "mask": smask,
                 "beta0": int(beta0),
                 "beta1": int(beta1),
+                "fiedler": float(fiedler),
                 "stream_fraction": stream_frac,
-                "segments_trunk": segs_trunk,
-                "segments_branch": segs_branch,
+                "segments": segments,
+                "segment_cc": seg_cc_arr,
                 "node_rows": node_r,
                 "node_cols": node_c,
+                "node_cc": node_cc,
             }
         except Exception:
             # Robust fallback if RivGraph fails on a given small patch.
             pass
 
     beta0, beta1 = betti_numbers_binary(smask)
-    segs_trunk, segs_branch, node_r, node_c = _mask_graph_segments(smask)
+    n_nodes, edge_list = _mask_graph_edge_list(smask)
+    fiedler = _fiedler_from_graph(n_nodes, edge_list)
+    segments, segment_cc, node_r, node_c, node_cc = _mask_graph_segments(smask)
+    if float(bridge_endpoints_px) > 0.0:
+        segments, segment_cc, node_cc = _bridge_components(
+            segments, segment_cc, node_c, node_r, node_cc, float(bridge_endpoints_px)
+        )
     return {
         "mask": smask,
         "beta0": int(beta0),
         "beta1": int(beta1),
+        "fiedler": float(fiedler),
         "stream_fraction": stream_frac,
-        "segments_trunk": segs_trunk,
-        "segments_branch": segs_branch,
+        "segments": segments,
+        "segment_cc": segment_cc,
         "node_rows": node_r,
         "node_cols": node_c,
+        "node_cc": node_cc,
     }
 
 
@@ -750,6 +1064,7 @@ def choose_next_location(
     channel_extractor: str,
     rivgraph_prune_dangling: bool,
     w_beta1: float,
+    w_fiedler: float,
     w_unseen: float,
     w_relief: float,
     min_valid_fraction: float,
@@ -760,6 +1075,8 @@ def choose_next_location(
     stagnation_patience: int,
     target_overlap: float,
     overlap_penalty: float,
+    mask_close_px: int = 0,
+    mask_dilate_px: int = 0,
 ) -> tuple[tuple[int, int], float, float, int, int]:
     """Choose next waypoint by direct delta-Betti utility."""
     target_overlap = float(np.clip(target_overlap, 0.05, 0.95))
@@ -788,7 +1105,7 @@ def choose_next_location(
     best_score = -np.inf
     all_cands = candidate_moves_multi(current, step_levels=step_levels)
     valid_cands: list[tuple[int, int]] = []
-    valid_meta: list[tuple[np.ndarray, tuple[int, int, int, int], float, int, int, float]] = []
+    valid_meta: list[tuple[np.ndarray, tuple[int, int, int, int], float, int, int, float, float]] = []
 
     for cand in all_cands:
         patch, (r0, r1, c0, c1) = capture_square(dem, cand[0], cand[1], side_px=side_px)
@@ -796,26 +1113,32 @@ def choose_next_location(
         if valid_frac < min_valid_fraction:
             continue
         unseen = 1.0 - float(np.mean(visited_mask[r0:r1, c0:c1]))
-        beta0, beta1, _ = patch_channel_metrics(
+        beta0, beta1, _, fiedler = patch_channel_metrics(
             patch,
             resolution_m=resolution_m,
             percentile=stream_percentile,
             extractor=channel_extractor,
             rivgraph_prune_dangling=rivgraph_prune_dangling,
+            mask_close_px=int(mask_close_px),
+            mask_dilate_px=int(mask_dilate_px),
         )
         relief = float(np.nanstd(patch))
         valid_cands.append(cand)
-        valid_meta.append((patch, (r0, r1, c0, c1), unseen, beta0, beta1, relief))
+        valid_meta.append((patch, (r0, r1, c0, c1), unseen, beta0, beta1, relief, fiedler))
 
     current_beta1 = float(records[-1].beta1) if records else 0.0
+    current_fiedler = float(records[-1].fiedler) if records else 0.0
 
     for i, cand in enumerate(valid_cands):
-        patch, (r0, r1, c0, c1), unseen, beta0, beta1, relief = valid_meta[i]
+        patch, (r0, r1, c0, c1), unseen, beta0, beta1, relief, fiedler = valid_meta[i]
         delta_beta1 = float(beta1) - current_beta1
+        delta_fiedler = float(fiedler) - current_fiedler
         # Direct objective: immediate topology gain plus exploration regularizers.
         score = (
             w_beta1 * delta_beta1
             + 0.4 * w_beta1 * float(beta1)
+            + w_fiedler * delta_fiedler
+            + 0.25 * w_fiedler * float(fiedler)
             + w_unseen * unseen
             + w_relief * (relief / 50.0)
         )
@@ -844,7 +1167,7 @@ def choose_next_location(
             best = (center, unseen, beta0, beta1)
     if best is None:
         patch, (r0, r1, c0, c1) = capture_square(dem, current[0], current[1], side_px=side_px)
-        beta0, beta1, _ = patch_channel_metrics(
+        beta0, beta1, _, _ = patch_channel_metrics(
             patch,
             resolution_m=resolution_m,
             percentile=stream_percentile,
@@ -937,9 +1260,13 @@ def run_experiment_on_dem(
             percentile=args.stream_percentile,
             extractor=args.channel_extractor,
             rivgraph_prune_dangling=args.rivgraph_prune_dangling,
+            mask_close_px=int(getattr(args, "mask_close_px", 0)),
+            mask_dilate_px=int(getattr(args, "mask_dilate_px", 0)),
+            bridge_endpoints_px=float(getattr(args, "bridge_endpoints_px", 0.0)),
         )
         beta0 = int(obs["beta0"])
         beta1 = int(obs["beta1"])
+        fiedler = float(obs.get("fiedler", 0.0))
         stream_frac = float(obs["stream_fraction"])
 
         rec = CaptureRecord(
@@ -948,6 +1275,7 @@ def run_experiment_on_dem(
             col=int((c0 + c1) // 2),
             beta0=beta0,
             beta1=beta1,
+            fiedler=fiedler,
             stream_fraction=stream_frac,
             unseen_fraction=unseen_frac,
             score=0.0,
@@ -966,6 +1294,7 @@ def run_experiment_on_dem(
                 channel_extractor=args.channel_extractor,
                 rivgraph_prune_dangling=args.rivgraph_prune_dangling,
                 w_beta1=args.w_beta1,
+                w_fiedler=args.w_fiedler,
                 w_unseen=args.w_unseen,
                 w_relief=args.w_relief,
                 min_valid_fraction=args.min_valid_fraction,
@@ -976,6 +1305,8 @@ def run_experiment_on_dem(
                 stagnation_patience=args.stagnation_patience,
                 target_overlap=args.target_overlap,
                 overlap_penalty=args.overlap_penalty,
+                mask_close_px=int(getattr(args, "mask_close_px", 0)),
+                mask_dilate_px=int(getattr(args, "mask_dilate_px", 0)),
             )
             rec.score = float(score)
         else:
@@ -1066,18 +1397,15 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
 
     # Local FOV DEM panel
     local_dem_img = ax02.imshow(np.zeros((side_px, side_px), dtype=float), cmap="terrain", origin="upper")
-    lc_dem_trunk = LineCollection([], colors="deepskyblue", linewidths=0.9, alpha=0.8)
-    lc_dem_branch = LineCollection([], colors="magenta", linewidths=1.1, alpha=0.85)
-    ax02.add_collection(lc_dem_trunk)
-    ax02.add_collection(lc_dem_branch)
-    dem_nodes = ax02.scatter([], [], c="yellow", s=9, edgecolors="none")
+    lc_dem_graph = LineCollection([], linewidths=1.0, alpha=0.9)
+    ax02.add_collection(lc_dem_graph)
+    dem_nodes = ax02.scatter([], [], s=9, edgecolors="none")
     ax02.set_title("DEM inside current FOV")
     ax02.set_axis_off()
     ax02.legend(
         handles=[
-            Line2D([0], [0], color="deepskyblue", lw=1.0, label="trunk edge"),
-            Line2D([0], [0], color="magenta", lw=1.0, label="branch edge"),
-            Line2D([0], [0], marker="o", color="yellow", lw=0, markersize=5, label="graph node"),
+            Line2D([0], [0], color="tab:blue", lw=1.0, label="edge (colored by component)"),
+            Line2D([0], [0], marker="o", color="tab:blue", lw=0, markersize=5, label="node (colored by component)"),
         ],
         loc="lower left",
         fontsize=8,
@@ -1086,30 +1414,28 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
 
     # Local extracted mask + local graph panel
     local_mask_img = ax12.imshow(np.zeros((side_px, side_px), dtype=float), cmap="gray", origin="upper", vmin=0.0, vmax=1.0)
-    lc_local_trunk = LineCollection([], colors="deepskyblue", linewidths=0.8, alpha=0.75)
-    lc_local_branch = LineCollection([], colors="magenta", linewidths=1.0, alpha=0.8)
-    ax12.add_collection(lc_local_trunk)
-    ax12.add_collection(lc_local_branch)
-    local_nodes = ax12.scatter([], [], c="yellow", s=8, edgecolors="none")
+    lc_local_graph = LineCollection([], linewidths=1.0, alpha=0.9)
+    ax12.add_collection(lc_local_graph)
+    local_nodes = ax12.scatter([], [], s=8, edgecolors="none")
     ax12.set_title("Extracted stream mask + local graph")
     ax12.set_axis_off()
     ax12.legend(
         handles=[
-            Line2D([0], [0], color="deepskyblue", lw=1.0, label="trunk edge"),
-            Line2D([0], [0], color="magenta", lw=1.0, label="branch edge"),
-            Line2D([0], [0], marker="o", color="yellow", lw=0, markersize=5, label="graph node"),
+            Line2D([0], [0], color="tab:blue", lw=1.0, label="edge (colored by component)"),
+            Line2D([0], [0], marker="o", color="tab:blue", lw=0, markersize=5, label="node (colored by component)"),
         ],
         loc="lower left",
         fontsize=8,
         framealpha=0.7,
     )
 
-    ax10.set_title("Betti history per capture")
+    ax10.set_title("Topology history per capture")
     ax10.set_xlabel("Step")
-    ax10.set_ylabel("Count")
+    ax10.set_ylabel("Topology metric")
     ax10.grid(alpha=0.25)
     beta0_line, = ax10.plot([], [], label="beta0", color="tab:blue")
     beta1_line, = ax10.plot([], [], label="beta1", color="tab:red")
+    fiedler_line, = ax10.plot([], [], label="fiedler", color="tab:brown")
     ax10.legend()
 
     ax11.set_title("Adaptive mapping diagnostics")
@@ -1126,6 +1452,7 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
     ys: list[float] = []
     beta0_hist: list[float] = []
     beta1_hist: list[float] = []
+    fiedler_hist: list[float] = []
     score_hist: list[float] = []
     unseen_hist: list[float] = []
     stream_hist: list[float] = []
@@ -1141,9 +1468,13 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
             percentile=args.stream_percentile,
             extractor=args.channel_extractor,
             rivgraph_prune_dangling=args.rivgraph_prune_dangling,
+            mask_close_px=int(getattr(args, "mask_close_px", 0)),
+            mask_dilate_px=int(getattr(args, "mask_dilate_px", 0)),
+            bridge_endpoints_px=float(getattr(args, "bridge_endpoints_px", 0.0)),
         )
         beta0 = int(obs["beta0"])
         beta1 = int(obs["beta1"])
+        fiedler = float(obs.get("fiedler", 0.0))
         stream_frac = float(obs["stream_fraction"])
 
         rec = CaptureRecord(
@@ -1152,6 +1483,7 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
             col=int((c0 + c1) // 2),
             beta0=beta0,
             beta1=beta1,
+            fiedler=fiedler,
             stream_fraction=stream_frac,
             unseen_fraction=unseen_frac,
             score=0.0,
@@ -1170,6 +1502,7 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
                 channel_extractor=args.channel_extractor,
                 rivgraph_prune_dangling=args.rivgraph_prune_dangling,
                 w_beta1=args.w_beta1,
+                w_fiedler=args.w_fiedler,
                 w_unseen=args.w_unseen,
                 w_relief=args.w_relief,
                 min_valid_fraction=args.min_valid_fraction,
@@ -1180,6 +1513,8 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
                 stagnation_patience=args.stagnation_patience,
                 target_overlap=args.target_overlap,
                 overlap_penalty=args.overlap_penalty,
+                mask_close_px=int(getattr(args, "mask_close_px", 0)),
+                mask_dilate_px=int(getattr(args, "mask_dilate_px", 0)),
             )
             rec.score = float(score)
         else:
@@ -1190,6 +1525,7 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
         ys.append(rec.row)
         beta0_hist.append(rec.beta0)
         beta1_hist.append(rec.beta1)
+        fiedler_hist.append(rec.fiedler)
         score_hist.append(rec.score)
         unseen_hist.append(rec.unseen_fraction)
         stream_hist.append(rec.stream_fraction)
@@ -1219,36 +1555,47 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
         local_dem_img.set_data(local_dem)
         mask = np.asarray(obs["mask"], dtype=bool)
         local_mask_img.set_data(mask.astype(float))
-        seg_trunk = obs.get("segments_trunk", [])
-        seg_branch = obs.get("segments_branch", [])
-        lc_dem_trunk.set_segments(seg_trunk if isinstance(seg_trunk, list) else [])
-        lc_dem_branch.set_segments(seg_branch if isinstance(seg_branch, list) else [])
-        lc_local_trunk.set_segments(seg_trunk if isinstance(seg_trunk, list) else [])
-        lc_local_branch.set_segments(seg_branch if isinstance(seg_branch, list) else [])
+        segs_all = obs.get("segments", []) or []
+        seg_cc = np.asarray(obs.get("segment_cc", np.array([], dtype=int)), dtype=int)
+        edge_rgba = _cc_colors_for_labels(seg_cc) if len(segs_all) > 0 else np.empty((0, 4))
+        lc_dem_graph.set_segments(segs_all)
+        lc_local_graph.set_segments(segs_all)
+        if edge_rgba.size > 0:
+            lc_dem_graph.set_colors(edge_rgba)
+            lc_local_graph.set_colors(edge_rgba)
+
         nr = np.asarray(obs["node_rows"], dtype=float)
         nc = np.asarray(obs["node_cols"], dtype=float)
+        ncc = np.asarray(obs.get("node_cc", np.array([], dtype=int)), dtype=int)
         if nr.size > 0:
+            node_rgba = _cc_colors_for_labels(ncc) if ncc.size == nr.size else None
             dem_nodes.set_offsets(np.column_stack((nc, nr)))
             local_nodes.set_offsets(np.column_stack((nc, nr)))
+            if node_rgba is not None:
+                dem_nodes.set_facecolors(node_rgba)
+                local_nodes.set_facecolors(node_rgba)
         else:
             dem_nodes.set_offsets(np.empty((0, 2)))
             local_nodes.set_offsets(np.empty((0, 2)))
         ax02.set_title(
             f"DEM in FOV ({patch.shape[0]}x{patch.shape[1]})"
         )
+        n_components_local = int(len(set(int(x) for x in ncc.tolist()))) if ncc.size > 0 else 0
         ax12.set_title(
-            f"Mask+graph in FOV (beta0={beta0}, beta1={beta1})"
+            f"Mask+graph in FOV (beta0={beta0}, beta1={beta1}, fiedler={fiedler:.3f}, "
+            f"components={n_components_local})"
         )
 
         x_axis = np.arange(len(records))
         beta0_line.set_data(x_axis, beta0_hist)
         beta1_line.set_data(x_axis, beta1_hist)
+        fiedler_line.set_data(x_axis, fiedler_hist)
         score_line.set_data(x_axis, score_hist)
         unseen_line.set_data(x_axis, unseen_hist)
         stream_line.set_data(x_axis, stream_hist)
 
         ax10.set_xlim(0, max(1, args.steps - 1))
-        ax10.set_ylim(-0.1, max(1.0, max(beta0_hist + beta1_hist) + 0.5))
+        ax10.set_ylim(-0.1, max(1.0, max(beta0_hist + beta1_hist + fiedler_hist) + 0.5))
         ax11.set_xlim(0, max(1, args.steps - 1))
         ax11.set_ylim(-0.05, max(1.0, max(score_hist + unseen_hist + stream_hist) + 0.1))
 
@@ -1316,11 +1663,13 @@ def save_plot(dem: np.ndarray, visited: np.ndarray, records: list[CaptureRecord]
     ax10 = ax[1, 0]
     beta0 = np.array([r.beta0 for r in records], dtype=float)
     beta1 = np.array([r.beta1 for r in records], dtype=float)
+    fiedler = np.array([r.fiedler for r in records], dtype=float)
     ax10.plot(beta0, label="beta0", color="tab:blue")
     ax10.plot(beta1, label="beta1", color="tab:red")
-    ax10.set_title("Betti history per capture")
+    ax10.plot(fiedler, label="fiedler", color="tab:brown")
+    ax10.set_title("Topology history per capture")
     ax10.set_xlabel("Step")
-    ax10.set_ylabel("Count")
+    ax10.set_ylabel("Topology metric")
     ax10.grid(alpha=0.25)
     ax10.legend()
 
@@ -1352,6 +1701,9 @@ def save_animation(
     stream_percentile: float,
     channel_extractor: str,
     rivgraph_prune_dangling: bool,
+    mask_close_px: int = 0,
+    mask_dilate_px: int = 0,
+    bridge_endpoints_px: float = 0.0,
 ) -> Path:
     """Save adaptive exploration as a matplotlib animation (GIF preferred)."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1395,18 +1747,15 @@ def save_animation(
     )
 
     local_dem_img = ax02.imshow(np.zeros((side_px, side_px), dtype=float), cmap="terrain", origin="upper")
-    lc_dem_trunk = LineCollection([], colors="deepskyblue", linewidths=0.9, alpha=0.8)
-    lc_dem_branch = LineCollection([], colors="magenta", linewidths=1.1, alpha=0.85)
-    ax02.add_collection(lc_dem_trunk)
-    ax02.add_collection(lc_dem_branch)
-    dem_nodes = ax02.scatter([], [], c="yellow", s=9, edgecolors="none")
+    lc_dem_graph = LineCollection([], linewidths=1.0, alpha=0.9)
+    ax02.add_collection(lc_dem_graph)
+    dem_nodes = ax02.scatter([], [], s=9, edgecolors="none")
     ax02.set_title("DEM inside current FOV")
     ax02.set_axis_off()
     ax02.legend(
         handles=[
-            Line2D([0], [0], color="deepskyblue", lw=1.0, label="trunk edge"),
-            Line2D([0], [0], color="magenta", lw=1.0, label="branch edge"),
-            Line2D([0], [0], marker="o", color="yellow", lw=0, markersize=5, label="graph node"),
+            Line2D([0], [0], color="tab:blue", lw=1.0, label="edge (colored by component)"),
+            Line2D([0], [0], marker="o", color="tab:blue", lw=0, markersize=5, label="node (colored by component)"),
         ],
         loc="lower left",
         fontsize=8,
@@ -1414,30 +1763,28 @@ def save_animation(
     )
 
     local_mask_img = ax12.imshow(np.zeros((side_px, side_px), dtype=float), cmap="gray", origin="upper", vmin=0.0, vmax=1.0)
-    lc_local_trunk = LineCollection([], colors="deepskyblue", linewidths=0.8, alpha=0.75)
-    lc_local_branch = LineCollection([], colors="magenta", linewidths=1.0, alpha=0.8)
-    ax12.add_collection(lc_local_trunk)
-    ax12.add_collection(lc_local_branch)
-    local_nodes = ax12.scatter([], [], c="yellow", s=8, edgecolors="none")
+    lc_local_graph = LineCollection([], linewidths=1.0, alpha=0.9)
+    ax12.add_collection(lc_local_graph)
+    local_nodes = ax12.scatter([], [], s=8, edgecolors="none")
     ax12.set_title("Extracted stream mask + local graph")
     ax12.set_axis_off()
     ax12.legend(
         handles=[
-            Line2D([0], [0], color="deepskyblue", lw=1.0, label="trunk edge"),
-            Line2D([0], [0], color="magenta", lw=1.0, label="branch edge"),
-            Line2D([0], [0], marker="o", color="yellow", lw=0, markersize=5, label="graph node"),
+            Line2D([0], [0], color="tab:blue", lw=1.0, label="edge (colored by component)"),
+            Line2D([0], [0], marker="o", color="tab:blue", lw=0, markersize=5, label="node (colored by component)"),
         ],
         loc="lower left",
         fontsize=8,
         framealpha=0.7,
     )
 
-    ax10.set_title("Betti history per capture")
+    ax10.set_title("Topology history per capture")
     ax10.set_xlabel("Step")
-    ax10.set_ylabel("Count")
+    ax10.set_ylabel("Topology metric")
     ax10.grid(alpha=0.25)
     beta0_line, = ax10.plot([], [], label="beta0", color="tab:blue")
     beta1_line, = ax10.plot([], [], label="beta1", color="tab:red")
+    fiedler_line, = ax10.plot([], [], label="fiedler", color="tab:brown")
     ax10.legend()
 
     ax11.set_title("Adaptive mapping diagnostics")
@@ -1452,13 +1799,14 @@ def save_animation(
     ys = np.array([r.row for r in records], dtype=float)
     beta0 = np.array([r.beta0 for r in records], dtype=float)
     beta1 = np.array([r.beta1 for r in records], dtype=float)
+    fiedler = np.array([r.fiedler for r in records], dtype=float)
     score = np.array([r.score for r in records], dtype=float)
     unseen = np.array([r.unseen_fraction for r in records], dtype=float)
     stream = np.array([r.stream_fraction for r in records], dtype=float)
     t = np.arange(len(records))
 
     ax10.set_xlim(0, max(1, len(records) - 1))
-    yb_max = max(1.0, float(max(np.max(beta0), np.max(beta1)) + 0.5))
+    yb_max = max(1.0, float(max(np.max(beta0), np.max(beta1), np.max(fiedler)) + 0.5))
     ax10.set_ylim(-0.1, yb_max)
     ax11.set_xlim(0, max(1, len(records) - 1))
     yd_max = max(1.0, float(max(np.max(score), np.max(unseen), np.max(stream)) + 0.1))
@@ -1501,31 +1849,45 @@ def save_animation(
             percentile=stream_percentile,
             extractor=channel_extractor,
             rivgraph_prune_dangling=rivgraph_prune_dangling,
+            mask_close_px=int(mask_close_px),
+            mask_dilate_px=int(mask_dilate_px),
+            bridge_endpoints_px=float(bridge_endpoints_px),
         )
         local_dem_img.set_data(np.ma.masked_invalid(patch))
         mask = np.asarray(obs["mask"], dtype=bool)
         local_mask_img.set_data(mask.astype(float))
-        seg_trunk = obs.get("segments_trunk", [])
-        seg_branch = obs.get("segments_branch", [])
-        lc_dem_trunk.set_segments(seg_trunk if isinstance(seg_trunk, list) else [])
-        lc_dem_branch.set_segments(seg_branch if isinstance(seg_branch, list) else [])
-        lc_local_trunk.set_segments(seg_trunk if isinstance(seg_trunk, list) else [])
-        lc_local_branch.set_segments(seg_branch if isinstance(seg_branch, list) else [])
+        segs_all = obs.get("segments", []) or []
+        seg_cc = np.asarray(obs.get("segment_cc", np.array([], dtype=int)), dtype=int)
+        edge_rgba = _cc_colors_for_labels(seg_cc) if len(segs_all) > 0 else np.empty((0, 4))
+        lc_dem_graph.set_segments(segs_all)
+        lc_local_graph.set_segments(segs_all)
+        if edge_rgba.size > 0:
+            lc_dem_graph.set_colors(edge_rgba)
+            lc_local_graph.set_colors(edge_rgba)
+
         nr = np.asarray(obs["node_rows"], dtype=float)
         nc = np.asarray(obs["node_cols"], dtype=float)
+        ncc = np.asarray(obs.get("node_cc", np.array([], dtype=int)), dtype=int)
         if nr.size > 0:
             dem_nodes.set_offsets(np.column_stack((nc, nr)))
             local_nodes.set_offsets(np.column_stack((nc, nr)))
+            if ncc.size == nr.size:
+                node_rgba = _cc_colors_for_labels(ncc)
+                dem_nodes.set_facecolors(node_rgba)
+                local_nodes.set_facecolors(node_rgba)
         else:
             dem_nodes.set_offsets(np.empty((0, 2)))
             local_nodes.set_offsets(np.empty((0, 2)))
         ax02.set_title(f"DEM in FOV ({patch.shape[0]}x{patch.shape[1]})")
+        n_components_local = int(len(set(int(x) for x in ncc.tolist()))) if ncc.size > 0 else 0
         ax12.set_title(
-            f"Mask+graph in FOV (beta0={int(obs['beta0'])}, beta1={int(obs['beta1'])})"
+            f"Mask+graph in FOV (beta0={int(obs['beta0'])}, beta1={int(obs['beta1'])}, "
+            f"fiedler={float(obs.get('fiedler', 0.0)):.3f}, components={n_components_local})"
         )
 
         beta0_line.set_data(t[: frame_idx + 1], beta0[: frame_idx + 1])
         beta1_line.set_data(t[: frame_idx + 1], beta1[: frame_idx + 1])
+        fiedler_line.set_data(t[: frame_idx + 1], fiedler[: frame_idx + 1])
         score_line.set_data(t[: frame_idx + 1], score[: frame_idx + 1])
         unseen_line.set_data(t[: frame_idx + 1], unseen[: frame_idx + 1])
         stream_line.set_data(t[: frame_idx + 1], stream[: frame_idx + 1])
@@ -1539,15 +1901,14 @@ def save_animation(
             lc_prox,
             node_scatter,
             local_dem_img,
-            lc_dem_trunk,
-            lc_dem_branch,
+            lc_dem_graph,
             dem_nodes,
             local_mask_img,
-            lc_local_trunk,
-            lc_local_branch,
+            lc_local_graph,
             local_nodes,
             beta0_line,
             beta1_line,
+            fiedler_line,
             score_line,
             unseen_line,
             stream_line,
@@ -1579,11 +1940,11 @@ def save_animation(
 def write_csv(records: list[CaptureRecord], out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "capture_metrics.csv"
-    header = "step,row,col,beta0,beta1,stream_fraction,unseen_fraction,score\n"
+    header = "step,row,col,beta0,beta1,fiedler,stream_fraction,unseen_fraction,score\n"
     lines = [header]
     for r in records:
         lines.append(
-            f"{r.step},{r.row},{r.col},{r.beta0},{r.beta1},"
+            f"{r.step},{r.row},{r.col},{r.beta0},{r.beta1},{r.fiedler:.6f},"
             f"{r.stream_fraction:.6f},{r.unseen_fraction:.6f},{r.score:.6f}\n"
         )
     out.write_text("".join(lines), encoding="utf-8")
@@ -1655,6 +2016,7 @@ def parse_args() -> argparse.Namespace:
         help="When using rivgraph extractor, prune dangling one-link branches before Betti.",
     )
     p.add_argument("--w-beta1", type=float, default=2.5)
+    p.add_argument("--w-fiedler", type=float, default=1.0)
     p.add_argument("--w-unseen", type=float, default=1.5)
     p.add_argument("--w-relief", type=float, default=0.7)
     p.add_argument("--w-hotspot", type=float, default=1.2)
@@ -1675,6 +2037,35 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--min-valid-fraction", type=float, default=0.6)
     p.add_argument("--stay-penalty", type=float, default=0.25)
+    p.add_argument(
+        "--mask-close-px",
+        type=int,
+        default=0,
+        help=(
+            "Morphological closing iterations on the stream mask (3x3 struct). "
+            "Bridges small gaps and produces fewer, larger connected channels. "
+            "Affects beta0/beta1/fiedler and the skeleton fed to rivgraph."
+        ),
+    )
+    p.add_argument(
+        "--mask-dilate-px",
+        type=int,
+        default=0,
+        help=(
+            "Morphological dilation iterations applied AFTER closing (3x3 struct). "
+            "Thickens channels so skeletonization fuses diagonal/near-parallel arms."
+        ),
+    )
+    p.add_argument(
+        "--bridge-endpoints-px",
+        type=float,
+        default=0.0,
+        help=(
+            "Post-graph stitching: merge connected components whose nodes fall within "
+            "this pixel radius, adding straight-line bridging edges. Affects the "
+            "rendered component count and coloring (does not re-run Betti)."
+        ),
+    )
     p.add_argument("--graph-radius-px", type=float, default=160.0)
     p.add_argument("--graph-k-nearest", type=int, default=2)
     p.add_argument("--animation-fps", type=int, default=6)
@@ -1728,6 +2119,9 @@ def main() -> None:
             stream_percentile=args.stream_percentile,
             channel_extractor=args.channel_extractor,
             rivgraph_prune_dangling=args.rivgraph_prune_dangling,
+            mask_close_px=int(getattr(args, "mask_close_px", 0)),
+            mask_dilate_px=int(getattr(args, "mask_dilate_px", 0)),
+            bridge_endpoints_px=float(getattr(args, "bridge_endpoints_px", 0.0)),
         )
     csv_path = write_csv(records, out_dir=out_dir)
 
