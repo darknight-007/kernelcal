@@ -299,6 +299,17 @@ Outputs are written under `--output-dir`:
 
 ### Bishop rocks graph explorer (`bishop_rocks_graph_explorer.py`)
 
+![Bishop rocks graph explorer — quadrant-adaptive run, step 80/80, FoV at (-58.1, 158.5) m, n_nodes=2505, β₀=1, β₁=6574, λ₂=0.00278, chosen quadrant NE](bishop_figures/rocks_explorer/bishop_rocks_explorer_live.png)
+
+*Quadrant-adaptive run at step 80/80. **(0,0)** full scarp map, rocks
+coloured by area (log), crimson scan window + path, gold arrow for the
+chosen next move. **(0,1)** local FoV graph — cyan k-NN, white radius
+edges, dashed quadrant dividers, per-quadrant `n / β₀ / β₁ / λ₂ / score`
+labels with the winning quadrant in gold. **(0,2)** area histogram inside
+the window. **(1,0)** topology history — `n_nodes`, `n_components`, β₁
+(cycles), Fiedler × 10. **(1,1)** trait medians. **(1,2)** cumulative
+explored rocks (eccentricity vs area, coloured by discovery step).*
+
 Point-data analogue of the drone DEM adaptive mapping above: the graph is
 built over **rock centroids** from the Bishop scarp Mask R-CNN inventory
 (`rocks-coord-list.csv` ≈ 82k rocks, `rock_traits_full.csv` ≈ 14k traits),
