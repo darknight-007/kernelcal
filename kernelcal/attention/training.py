@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -322,75 +323,13 @@ def run_training_experiment(
     return records
 
 
-def _save_results(records: List[TrainingRecord], out: Path, verbose: bool) -> None:
-    out.mkdir(parents=True, exist_ok=True)
-    # JSON
-    data = [
-        dict(step=r.step, train_acc=r.train_acc, val_acc=r.val_acc,
-             loss=r.loss, residual=r.residuals[0],
-             H=r.h_entropies[0], delta_prime=r.fiedler_gaps[0],
-             lambda1=r.fiedler_values[0], velocity=r.kernel_velocity[0])
-        for r in records
-    ]
-    (out / 'training_diagnostics.json').write_text(json.dumps(data, indent=2))
-
-    try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-
-        BG, SURF, GOLD = '#0d1117', '#161b22', '#e2b44d'
-        steps  = [r.step for r in records]
-        acc_tr = [r.train_acc for r in records]
-        acc_v  = [r.val_acc for r in records]
-        loss   = [r.loss for r in records]
-        H      = [r.h_entropies[0] for r in records]
-        delta  = [r.fiedler_gaps[0] for r in records]
-        resid  = [r.residuals[0] for r in records]
-        vel    = [r.kernel_velocity[0] for r in records]
-
-        fig, axes = plt.subplots(2, 3, figsize=(14, 8), dpi=150)
-        fig.patch.set_facecolor(BG)
-        fig.suptitle('MaxCal Diagnostics During Transformer Training (Modular Addition)',
-                     color=GOLD, fontsize=12, y=1.01)
-
-        panels = [
-            (axes[0,0], steps, [acc_tr, acc_v], ['#a5d6a7','#ffb74d'],
-             ['Train acc','Val acc'],  'Accuracy', 'Grokking transition'),
-            (axes[0,1], steps, [loss], ['#ef5350'], ['Loss'],
-             'Cross-entropy loss', 'Training loss'),
-            (axes[0,2], steps, [H], ['#4fc3f7'], ['H[h_t]'],
-             'Spectral entropy', 'MaxCal path entropy'),
-            (axes[1,0], steps, [delta], ['#a5d6a7'], ["Δ'(h_t)"],
-             "Fiedler gap Δ'", 'Stability margin'),
-            (axes[1,1], steps, [resid], ['#ce93d8'], ['||R-T||_∞'],
-             'Field-eq residual', 'Self-consistency: → 0 = converging to MaxCal fixed point'),
-            (axes[1,2], steps[1:], [vel[1:]], ['#ff8a65'], ['||Δh_t||'],
-             'Kernel velocity', 'Speed limit test: should decrease at convergence'),
-        ]
-
-        for ax, xs, ys, cs, labs, ylabel, title in panels:
-            ax.set_facecolor(SURF)
-            for y, c, lab in zip(ys, cs, labs):
-                ax.plot(xs[:len(y)], y, color=c, lw=1.6, label=lab)
-            ax.set_xlabel('Step', color='#b0bec5', fontsize=9)
-            ax.set_ylabel(ylabel, color='#b0bec5', fontsize=9)
-            ax.set_title(title, color='#e0e0e0', fontsize=9)
-            ax.tick_params(colors='#78909c')
-            for sp in ax.spines.values(): sp.set_color('#263238')
-            if len(labs) > 1:
-                ax.legend(fontsize=8, labelcolor='#b0bec5',
-                         facecolor='#1a1a2e', edgecolor='#37474f')
-
-        plt.tight_layout()
-        plt.savefig(out / 'fig5_training_dynamics.pdf',
-                    bbox_inches='tight', facecolor=BG)
-        plt.close()
-        if verbose:
-            print(f"[training] saved → {out}/fig5_training_dynamics.pdf")
-    except Exception as e:
-        if verbose:
-            print(f"[training] plot skipped: {e}")
+# Plotting + JSON writing lives in ``training_plots`` so this module can be
+# imported on headless installs.  The underscore names remain available as
+# re-exports for any external callers that reach into the private API.
+from .training_plots import (  # noqa: E402, F401  (re-export)
+    _save_results,
+    _save_ensemble_results,
+)
 
 
 def run_ensemble_experiment(
@@ -481,142 +420,6 @@ def run_ensemble_experiment(
     return result
 
 
-def _save_ensemble_results(result: dict, out: Path, verbose: bool) -> None:
-    """Save JSON summary and publication-quality ensemble figures."""
-    steps = result['steps']
-    mean  = result['mean']
-    std   = result['std']
-    final = result['final']
-    n_runs = len(result['raw'])
-
-    # JSON
-    summary = {
-        'n_runs': n_runs, 'primes': result['primes'], 'seeds': result['seeds'],
-        'final_distributions': {k: {'mean': float(v.mean()), 'std': float(v.std()),
-                                    'min': float(v.min()), 'max': float(v.max())}
-                                 for k, v in final.items()},
-    }
-    (out / 'ensemble_summary.json').write_text(json.dumps(summary, indent=2))
-
-    try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        from matplotlib.gridspec import GridSpec
-
-        BG, SURF, GOLD, SILVER = '#0d1117', '#161b22', '#e2b44d', '#b0bec5'
-
-        METRICS = [
-            ('residual',    '#ce93d8', 'Field-eq residual ||R-T||_inf',
-             'Self-consistency → 0 = MaxCal fixed point'),
-            ('H',           '#4fc3f7', 'Spectral entropy H[h_t]',
-             'Path entropy — measures breadth of attention'),
-            ('delta_prime', '#a5d6a7', "Fiedler gap Delta'(h_t)",
-             'Stability margin — should increase with training'),
-            ('velocity',    '#ff8a65', 'Kernel velocity ||Δh_t||',
-             'Speed limit — should decrease with training'),
-        ]
-
-        # ── Fig A: Trajectory with error bands ───────────────────────
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8), dpi=150)
-        fig.patch.set_facecolor(BG)
-        fig.suptitle(
-            f'MaxCal Kernel Dynamics — Ensemble ({n_runs} runs, '
-            f'primes={result["primes"]}, {result["seeds"]} seeds each)',
-            color=GOLD, fontsize=11, y=1.01,
-        )
-
-        for ax, (key, col, ylabel, title) in zip(axes.ravel(), METRICS):
-            ax.set_facecolor(SURF)
-            ax.tick_params(colors='#78909c')
-            for sp in ax.spines.values(): sp.set_color('#263238')
-            mu, sg = mean[key], std[key]
-            xs = steps[:len(mu)]
-            if key == 'velocity': xs = steps[1:len(mu)+1]
-            ax.fill_between(xs, mu - sg, mu + sg,
-                            alpha=0.3, color=col, label='mean ± 1 std')
-            ax.plot(xs, mu, color=col, lw=2, label='mean')
-            # Per-prime means
-            colors_p = ['#80cbc4', '#ffcc02', '#f48fb1']
-            for pi, (prime, c_p) in enumerate(zip(result['primes'], colors_p)):
-                runs_p = [i for i, m in enumerate(result['meta'])
-                          if m['prime'] == prime]
-                arr_p  = np.array([result['raw'][i]
-                                   for i in runs_p])
-                vals_p = np.array([[getattr(r, key + ('s' if key != 'H' and
-                                   key != 'velocity' and key != 'residual' and
-                                   key != 'delta_prime' and key != 'lambda1'
-                                   else '')
-                                   if False else
-                                   {'residual':'residuals','H':'h_entropies',
-                                    'delta_prime':'fiedler_gaps',
-                                    'lambda1':'fiedler_values',
-                                    'velocity':'kernel_velocity'}[key])[0]
-                                   for r in recs] for recs in arr_p])
-                ax.plot(xs[:vals_p.shape[1]], vals_p.mean(axis=0),
-                        color=c_p, lw=1, ls='--', alpha=0.7, label=f'p={prime}')
-            ax.set_xlabel('Step', color=SILVER, fontsize=9)
-            ax.set_ylabel(ylabel, color=SILVER, fontsize=9)
-            ax.set_title(title, color='#e0e0e0', fontsize=9)
-            ax.legend(fontsize=7, labelcolor=SILVER,
-                      facecolor='#1a1a2e', edgecolor='#37474f', ncol=2)
-
-        plt.tight_layout()
-        plt.savefig(out / 'fig6_ensemble_trajectories.pdf',
-                    bbox_inches='tight', facecolor=BG)
-        plt.close()
-
-        # ── Fig B: Final-step distributions (violin + box) ───────────
-        fig, axes = plt.subplots(1, 4, figsize=(14, 5), dpi=150)
-        fig.patch.set_facecolor(BG)
-        fig.suptitle('Distribution of MaxCal Diagnostics at Final Training Step',
-                     color=GOLD, fontsize=11, y=1.01)
-
-        for ax, (key, col, ylabel, _) in zip(axes, METRICS):
-            ax.set_facecolor(SURF)
-            ax.tick_params(colors='#78909c')
-            for sp in ax.spines.values(): sp.set_color('#263238')
-            vals = final[key]
-            # Violin
-            vp = ax.violinplot([vals], positions=[0], showmedians=True,
-                               showextrema=True)
-            for pc in vp['bodies']:
-                pc.set_facecolor(col)
-                pc.set_alpha(0.7)
-            vp['cmedians'].set_color('white')
-            vp['cmaxes'].set_color('#37474f')
-            vp['cmins'].set_color('#37474f')
-            vp['cbars'].set_color('#37474f')
-            # Per-prime points
-            for pi, (prime, c_p) in enumerate(zip(result['primes'], colors_p)):
-                runs_p = [i for i, m in enumerate(result['meta'])
-                          if m['prime'] == prime]
-                v_p = final[key][runs_p]
-                xs_jit = np.random.uniform(-0.15, 0.15, len(v_p))
-                ax.scatter(xs_jit, v_p, c=c_p, s=25, alpha=0.8,
-                           label=f'p={prime}', zorder=5)
-            ax.set_xticks([])
-            ax.set_ylabel(ylabel, color=SILVER, fontsize=9)
-            ax.set_title(f'μ={vals.mean():.3f}\nσ={vals.std():.3f}',
-                         color='#e0e0e0', fontsize=8)
-            ax.legend(fontsize=7, labelcolor=SILVER,
-                      facecolor='#1a1a2e', edgecolor='#37474f')
-
-        plt.tight_layout()
-        plt.savefig(out / 'fig7_final_distributions.pdf',
-                    bbox_inches='tight', facecolor=BG)
-        plt.close()
-
-        if verbose:
-            print(f"[ensemble] saved → {out}/fig6_ensemble_trajectories.pdf")
-            print(f"[ensemble] saved → {out}/fig7_final_distributions.pdf")
-
-    except Exception as e:
-        if verbose:
-            print(f"[ensemble] plots failed: {e}")
-        import traceback; traceback.print_exc()
-
-
 def _main() -> None:
     import argparse
     parser = argparse.ArgumentParser(
@@ -629,8 +432,14 @@ def _main() -> None:
     parser.add_argument('--steps', type=int, default=2000)
     parser.add_argument('--log-every', type=int, default=50)
     parser.add_argument('--device', default=None)
-    parser.add_argument('--output-dir',
-        default='/home/jdas/Documents/manuscripts/attention-kernel-maxcal/figures')
+    parser.add_argument(
+        '--output-dir',
+        default=os.environ.get(
+            'KERNELCAL_ATTENTION_FIG_DIR',
+            '/home/jdas/Documents/manuscripts/attention-kernel-maxcal/figures',
+        ),
+        help='directory to write training figures + JSON into '
+             '(env: KERNELCAL_ATTENTION_FIG_DIR)')
     parser.add_argument('--single', action='store_true',
         help='Run a single seed (prime=97) for quick testing')
     args = parser.parse_args()

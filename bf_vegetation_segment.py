@@ -35,11 +35,20 @@ from PIL import Image
 # ──────────────────────────────────────────────
 # CONFIG
 # ──────────────────────────────────────────────
-DATA_DIR = Path('/home/jdas/dreams-lab-website-server/deepgis-xr/data')
+# Paths and service URLs resolve from environment variables so this driver
+# can run on machines other than the author's LAN (where the default
+# 192.168.0.232 GPU server lives).  See module docstring for expected
+# directory layout.
+import os as _os
+
+DATA_DIR = Path(_os.environ.get(
+    'KERNELCAL_BF_DATA_DIR',
+    '/home/jdas/dreams-lab-website-server/deepgis-xr/data',
+))
 OUT_DIR  = DATA_DIR / 'vegetation_labels'
 
-GROUNDED_SAM_URL = 'http://192.168.0.232:5001'
-GROUNDING_DINO_URL = 'http://192.168.0.232:5000'
+GROUNDED_SAM_URL   = _os.environ.get('KERNELCAL_GROUNDED_SAM_URL',   'http://192.168.0.232:5001')
+GROUNDING_DINO_URL = _os.environ.get('KERNELCAL_GROUNDING_DINO_URL', 'http://192.168.0.232:5000')
 
 # Prefer highest-res tiles; fall back to max available
 TARGET_ZOOM = 16

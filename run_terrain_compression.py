@@ -1,12 +1,55 @@
 #!/usr/bin/env python3
-"""Live compression experiment on artburysol175.obj — Nyström path."""
+"""Live compression experiment on a large OBJ mesh — Nyström path.
 
+Usage
+-----
+    python run_terrain_compression.py <input.obj> [--out-dir DIR]
+
+Environment
+-----------
+    KERNELCAL_TERRAIN_OBJ      default input OBJ path
+    KERNELCAL_TERRAIN_OUT_DIR  default output directory
+
+If neither a CLI argument nor an environment variable is provided, the
+script falls back to the author's local dev paths (which will not exist
+on other machines — this is an experiment driver, not a library CLI).
+"""
+
+import argparse
+import os
 import sys
 import time
 from pathlib import Path
 
-OBJ = Path("/home/jdas/terrain-mapping/models/terrain/meshes/artburysol175.obj")
-OUT_DIR = Path("/home/jdas/terrain-mapping/models/terrain/meshes")
+_DEFAULT_OBJ = Path(
+    os.environ.get(
+        "KERNELCAL_TERRAIN_OBJ",
+        "/home/jdas/terrain-mapping/models/terrain/meshes/artburysol175.obj",
+    )
+)
+_DEFAULT_OUT_DIR = Path(
+    os.environ.get(
+        "KERNELCAL_TERRAIN_OUT_DIR",
+        "/home/jdas/terrain-mapping/models/terrain/meshes",
+    )
+)
+
+parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+parser.add_argument("obj", nargs="?", default=str(_DEFAULT_OBJ),
+                    help="input OBJ mesh (default: $KERNELCAL_TERRAIN_OBJ)")
+parser.add_argument("--out-dir", default=str(_DEFAULT_OUT_DIR),
+                    help="output directory for .kcmesh payloads and decoded OBJ")
+_args = parser.parse_args()
+
+OBJ = Path(_args.obj)
+OUT_DIR = Path(_args.out_dir)
+
+if not OBJ.exists():
+    raise SystemExit(
+        f"input OBJ not found: {OBJ}\n"
+        "Pass a path as the first argument or set KERNELCAL_TERRAIN_OBJ."
+    )
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(Path(__file__).parent))
 

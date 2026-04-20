@@ -31,13 +31,20 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from io import BytesIO
-from typing import Callable, Deque, List, Optional
+from typing import TYPE_CHECKING, Callable, Deque, List, Optional
 
 import numpy as np
 
-from ..geo3d.spectral_codec import CompressedSpectralKernel, compress_point_cloud
 from ..kernel.trajectory import KernelTrajectory
 from ..kernel.space import hilbert_schmidt_distance
+
+if TYPE_CHECKING:
+    # Imported only for type-checkers; ``kernelcal.geo3d`` is heavy and is
+    # resolved lazily at runtime inside the functions that need it so that
+    # ``import kernelcal.video`` (and therefore ``import kernelcal``) does not
+    # pay the geo3d / spectral-codec startup cost unless a frame is actually
+    # compressed.
+    from ..geo3d.spectral_codec import CompressedSpectralKernel
 
 
 # ---------------------------------------------------------------------------
@@ -225,16 +232,16 @@ class DepthStreamCodec:
         if timestamp is None:
             timestamp = time.time()
 
+        from ..geo3d.spectral_codec import compress_point_cloud
+
         n_raw = len(points_xyz)
 
-        # Decide mode count before compressing
         is_keyframe = (
             self._frame_idx == 0
             or self._frames_since_keyframe >= self.cfg.force_keyframe_every
         )
         n_modes = self.cfg.n_modes_keyframe if is_keyframe else self.cfg.n_modes_delta
 
-        # Compress
         c = compress_point_cloud(
             points_xyz,
             max_points=self.cfg.max_points,
