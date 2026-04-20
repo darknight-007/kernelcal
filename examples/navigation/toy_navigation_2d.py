@@ -20,8 +20,8 @@ allocation (and GPU utilisation when available) for every kernelcal call:
   4. Transfer       — HumanPilotDemonstrationLearner fits λ from the demos and
                       builds a transferred planner for a new (shifted) grid.
 
-Outputs (saved in tests/figures/)
-----------------------------------
+Outputs (saved in examples/navigation/figures/, gitignored)
+-----------------------------------------------------------
   fig1_environment.png      — grid layout, terrain complexity, obstacle
   fig2_slam_evolution.png   — novelty score, loop-closure conf, HS trajectory
   fig3_maxcal_planner.png   — probability distribution snapshots (5 frames)
@@ -34,7 +34,7 @@ Outputs (saved in tests/figures/)
 Run
 ---
     cd deepgis-maxcal-integration
-    python tests/toy_navigation_2d.py
+    python examples/navigation/toy_navigation_2d.py
 """
 
 import sys
@@ -54,7 +54,10 @@ from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 import matplotlib.patches as mpatches
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# File lives under ``examples/navigation/`` — walk three levels up to reach
+# the repo root so ``import kernelcal`` resolves when the script is invoked
+# directly (``python examples/navigation/toy_navigation_2d.py``).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from kernelcal.navigation.slam import SemanticSLAMKernelTracker
 from kernelcal.navigation.planner import InformativePathPlanner

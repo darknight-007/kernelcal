@@ -6,6 +6,17 @@ cache/
 datasets/
 urban_cache/
 
+# Regenerable run outputs — produced by integration / batch scripts, never
+# meant to be committed (see README pointers for how to regenerate).
+integration_batch_outputs/
+rivgraph_analysis_results/
+
+# Test + example figure artifacts (regenerable from the demo scripts that
+# write them). Keeping them untracked forces the "source of truth" to be
+# the scripts themselves, not a snapshot PNG.
+tests/figures/
+examples/*/figures/
+
 *.py[cod]
 *.pyo
 *.pyd

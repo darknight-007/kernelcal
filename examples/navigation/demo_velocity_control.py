@@ -19,8 +19,8 @@ The demo wires together all four navigation modules:
        ↓
   HumanPilotDemonstrationLearner (λ transfer)
 
-Outputs (tests/figures/)
-------------------------
+Outputs (examples/navigation/figures/, gitignored)
+--------------------------------------------------
   vel_fig1_overview.png      — environment with velocity heat-map overlay
   vel_fig2_velocity_profile.png — v(t) and all contributing factors over time
   vel_fig3_factor_breakdown.png — per-factor contribution waterfall
@@ -43,7 +43,10 @@ from matplotlib.cm import ScalarMappable
 import matplotlib.patches as mpatches
 from matplotlib.collections import LineCollection
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# File lives under ``examples/navigation/`` — walk three levels up to reach
+# the repo root so ``import kernelcal`` resolves when the script is invoked
+# directly (``python examples/navigation/demo_velocity_control.py``).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from kernelcal.navigation.slam import SemanticSLAMKernelTracker, descriptors_to_kernel
 from kernelcal.navigation.planner import InformativePathPlanner

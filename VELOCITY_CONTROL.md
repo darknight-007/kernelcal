@@ -215,7 +215,7 @@ kernelcal_velocity = Node(
 
 ## Demo toy result interpretation
 
-Running `tests/demo_velocity_control.py` with synthetic ORB-SLAM3-style descriptors:
+Running `examples/navigation/demo_velocity_control.py` with synthetic ORB-SLAM3-style descriptors:
 
 | Metric | Value | Interpretation |
 |---|---|---|
