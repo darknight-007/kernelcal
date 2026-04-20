@@ -32,6 +32,7 @@ from scipy import ndimage
 import matplotlib.pyplot as plt
 from matplotlib import animation as mpl_animation
 from matplotlib.collections import LineCollection
+from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 
 
@@ -512,6 +513,146 @@ def patch_channel_metrics(
     return beta0, beta1, stream_frac
 
 
+def _mask_graph_segments(
+    mask: np.ndarray,
+    *,
+    max_edges: int = 4000,
+    max_nodes: int = 2500,
+) -> tuple[list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
+    """Build a lightweight pixel-graph visualization from a binary mask.
+
+    Returns:
+      - trunk-like segments (non-junction edges),
+      - branch/junction segments,
+      - node rows,
+      - node cols.
+    """
+    m = np.asarray(mask, dtype=bool)
+    rows, cols = np.where(m)
+    if rows.size == 0:
+        return [], [], np.array([], dtype=float), np.array([], dtype=float)
+
+    if rows.size > max_nodes:
+        sel = np.linspace(0, rows.size - 1, max_nodes, dtype=int)
+        rows_show = rows[sel].astype(float)
+        cols_show = cols[sel].astype(float)
+    else:
+        rows_show = rows.astype(float)
+        cols_show = cols.astype(float)
+
+    degrees: dict[tuple[int, int], int] = {}
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        degrees[(r, c)] = 0
+
+    trunk: list[np.ndarray] = []
+    branch: list[np.ndarray] = []
+    # 8-neighbour undirected edges, emitted once.
+    neigh = [(0, 1), (1, 0), (1, 1), (1, -1)]
+    nrows, ncols = m.shape
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        for dr, dc in neigh:
+            rr, cc = r + dr, c + dc
+            if 0 <= rr < nrows and 0 <= cc < ncols and m[rr, cc]:
+                degrees[(r, c)] = degrees.get((r, c), 0) + 1
+                degrees[(rr, cc)] = degrees.get((rr, cc), 0) + 1
+
+    edge_count = 0
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        for dr, dc in neigh:
+            rr, cc = r + dr, c + dc
+            if 0 <= rr < nrows and 0 <= cc < ncols and m[rr, cc]:
+                seg = np.array([[float(c), float(r)], [float(cc), float(rr)]], dtype=float)
+                if degrees.get((r, c), 0) >= 3 or degrees.get((rr, cc), 0) >= 3:
+                    branch.append(seg)
+                else:
+                    trunk.append(seg)
+                edge_count += 1
+                if edge_count >= max_edges:
+                    return trunk, branch, rows_show, cols_show
+    return trunk, branch, rows_show, cols_show
+
+
+def patch_channel_observation(
+    patch_dem: np.ndarray,
+    resolution_m: float,
+    percentile: float,
+    extractor: str,
+    rivgraph_prune_dangling: bool,
+) -> dict[str, object]:
+    """Per-patch channel extraction outputs for visualization and scoring."""
+    smask = stream_mask_from_patch(
+        patch_dem,
+        resolution_m=resolution_m,
+        percentile=percentile,
+    )
+    stream_frac = float(np.mean(smask))
+    if extractor == "rivgraph":
+        try:
+            m2g, lnu = _load_rivgraph_modules()
+            skel = m2g.skeletonize_mask(np.asarray(smask, dtype=bool))
+            links, nodes = m2g.skel_to_graph(skel)
+            if rivgraph_prune_dangling:
+                dangling = []
+                for conn in nodes.get("conn", []):
+                    if len(conn) == 1:
+                        dangling.append(conn[0])
+                for lid in dangling:
+                    links, nodes = lnu.delete_link(links, nodes, lid)
+            beta0, beta1 = _betti_from_rivgraph_links_nodes(links, nodes)
+            node_deg: dict[int, int] = {}
+            for nid, conn in zip(nodes.get("id", []), nodes.get("conn", [])):
+                node_deg[int(nid)] = int(len(conn))
+            segs_trunk: list[np.ndarray] = []
+            segs_branch: list[np.ndarray] = []
+            for conn, lidcs in zip(links.get("conn", []), links.get("idx", [])):
+                pix = np.asarray(list(lidcs), dtype=np.int64)
+                if pix.size < 2:
+                    continue
+                rc = np.unravel_index(pix, smask.shape)
+                seg = np.column_stack((rc[1].astype(float), rc[0].astype(float)))
+                is_branch = False
+                if conn is not None and len(conn) == 2:
+                    a, b = int(conn[0]), int(conn[1])
+                    is_branch = node_deg.get(a, 0) >= 3 or node_deg.get(b, 0) >= 3
+                if is_branch:
+                    segs_branch.append(seg)
+                else:
+                    segs_trunk.append(seg)
+            nrows, ncols = smask.shape
+            node_r = np.zeros(len(nodes.get("idx", [])), dtype=float)
+            node_c = np.zeros(len(nodes.get("idx", [])), dtype=float)
+            for i, pix in enumerate(nodes.get("idx", [])):
+                r, c = np.unravel_index(int(pix), (nrows, ncols))
+                node_r[i] = float(r)
+                node_c[i] = float(c)
+            return {
+                "mask": smask,
+                "beta0": int(beta0),
+                "beta1": int(beta1),
+                "stream_fraction": stream_frac,
+                "segments_trunk": segs_trunk,
+                "segments_branch": segs_branch,
+                "node_rows": node_r,
+                "node_cols": node_c,
+            }
+        except Exception:
+            # Robust fallback if RivGraph fails on a given small patch.
+            pass
+
+    beta0, beta1 = betti_numbers_binary(smask)
+    segs_trunk, segs_branch, node_r, node_c = _mask_graph_segments(smask)
+    return {
+        "mask": smask,
+        "beta0": int(beta0),
+        "beta1": int(beta1),
+        "stream_fraction": stream_frac,
+        "segments_trunk": segs_trunk,
+        "segments_branch": segs_branch,
+        "node_rows": node_r,
+        "node_cols": node_c,
+    }
+
+
 def clip_center(row: int, col: int, half_side: int, shape: tuple[int, int]) -> tuple[int, int]:
     """Keep center inside valid square-capture bounds."""
     nrows, ncols = shape
@@ -542,10 +683,67 @@ def candidate_moves(center: tuple[int, int], step_px: int) -> list[tuple[int, in
     return candidates
 
 
+def candidate_moves_multi(center: tuple[int, int], step_levels: list[int]) -> list[tuple[int, int]]:
+    """Union of candidate moves at multiple step radii."""
+    out: list[tuple[int, int]] = [center]
+    seen = {center}
+    for step in step_levels:
+        for cand in candidate_moves(center, step_px=max(1, int(step))):
+            if cand not in seen:
+                out.append(cand)
+                seen.add(cand)
+    return out
+
+
+def fov_overlap_fraction(
+    current: tuple[int, int],
+    candidate: tuple[int, int],
+    side_px: int,
+) -> float:
+    """Fractional area overlap between two same-size square captures."""
+    dr = abs(int(candidate[0]) - int(current[0]))
+    dc = abs(int(candidate[1]) - int(current[1]))
+    overlap_r = max(0, int(side_px) - dr)
+    overlap_c = max(0, int(side_px) - dc)
+    area = max(1, int(side_px) * int(side_px))
+    return float((overlap_r * overlap_c) / area)
+
+
+def no_improvement_steps(records: list[CaptureRecord]) -> int:
+    """How many trailing steps since last global-best beta1."""
+    if not records:
+        return 0
+    best = max(r.beta1 for r in records)
+    c = 0
+    for r in reversed(records):
+        if r.beta1 < best:
+            c += 1
+        else:
+            break
+    return c
+
+
+def hotspot_centroid(records: list[CaptureRecord], top_k: int = 12) -> tuple[float, float] | None:
+    """Weighted centroid of highest-beta1 past captures."""
+    if len(records) == 0:
+        return None
+    vals = np.array([float(r.beta1) for r in records], dtype=float)
+    if np.max(vals) <= 0:
+        return None
+    k = int(min(max(1, top_k), len(records)))
+    idx = np.argsort(-vals)[:k]
+    w = vals[idx]
+    w = np.maximum(w, 1e-6)
+    rows = np.array([records[i].row for i in idx], dtype=float)
+    cols = np.array([records[i].col for i in idx], dtype=float)
+    return float(np.sum(rows * w) / np.sum(w)), float(np.sum(cols * w) / np.sum(w))
+
+
 def choose_next_location(
     dem: np.ndarray,
     visited_mask: np.ndarray,
     current: tuple[int, int],
+    records: list[CaptureRecord],
     side_px: int,
     resolution_m: float,
     stream_percentile: float,
@@ -556,12 +754,43 @@ def choose_next_location(
     w_relief: float,
     min_valid_fraction: float,
     stay_penalty: float,
+    w_hotspot: float,
+    w_momentum: float,
+    revisit_penalty: float,
+    stagnation_patience: int,
+    target_overlap: float,
+    overlap_penalty: float,
 ) -> tuple[tuple[int, int], float, float, int, int]:
-    """Choose next waypoint by maximizing topology-aware utility."""
-    step_px = max(3, int(round(0.7 * side_px)))
+    """Choose next waypoint by direct delta-Betti utility."""
+    target_overlap = float(np.clip(target_overlap, 0.05, 0.95))
+    base_step = max(2, int(round((1.0 - target_overlap) * side_px)))
+    step_px = base_step
+    no_improve = no_improvement_steps(records)
+    step_levels = [step_px]
+    if no_improve >= max(1, int(stagnation_patience)):
+        step_levels.append(2 * step_px)
+    if no_improve >= 2 * max(1, int(stagnation_patience)):
+        step_levels.append(3 * step_px)
+
+    hot = hotspot_centroid(records, top_k=12)
+    cur_hot_dist = None
+    if hot is not None:
+        cur_hot_dist = float(np.hypot(current[0] - hot[0], current[1] - hot[1]))
+
+    recent = {(r.row, r.col) for r in records[-20:]} if records else set()
+    prev_vec = None
+    if len(records) >= 2:
+        a = records[-2]
+        b = records[-1]
+        prev_vec = np.array([b.row - a.row, b.col - a.col], dtype=float)
+
     best = None
     best_score = -np.inf
-    for cand in candidate_moves(current, step_px=step_px):
+    all_cands = candidate_moves_multi(current, step_levels=step_levels)
+    valid_cands: list[tuple[int, int]] = []
+    valid_meta: list[tuple[np.ndarray, tuple[int, int, int, int], float, int, int, float]] = []
+
+    for cand in all_cands:
         patch, (r0, r1, c0, c1) = capture_square(dem, cand[0], cand[1], side_px=side_px)
         valid_frac = float(np.mean(np.isfinite(patch)))
         if valid_frac < min_valid_fraction:
@@ -575,9 +804,40 @@ def choose_next_location(
             rivgraph_prune_dangling=rivgraph_prune_dangling,
         )
         relief = float(np.nanstd(patch))
-        score = w_beta1 * beta1 + w_unseen * unseen + w_relief * (relief / 50.0)
+        valid_cands.append(cand)
+        valid_meta.append((patch, (r0, r1, c0, c1), unseen, beta0, beta1, relief))
+
+    current_beta1 = float(records[-1].beta1) if records else 0.0
+
+    for i, cand in enumerate(valid_cands):
+        patch, (r0, r1, c0, c1), unseen, beta0, beta1, relief = valid_meta[i]
+        delta_beta1 = float(beta1) - current_beta1
+        # Direct objective: immediate topology gain plus exploration regularizers.
+        score = (
+            w_beta1 * delta_beta1
+            + 0.4 * w_beta1 * float(beta1)
+            + w_unseen * unseen
+            + w_relief * (relief / 50.0)
+        )
+        overlap_frac = fov_overlap_fraction(current=current, candidate=cand, side_px=side_px)
+        score -= overlap_penalty * abs(overlap_frac - target_overlap)
+
+        if hot is not None and cur_hot_dist is not None:
+            cand_hot_dist = float(np.hypot(cand[0] - hot[0], cand[1] - hot[1]))
+            score += w_hotspot * (cur_hot_dist - cand_hot_dist) / (side_px + 1e-6)
+
+        if prev_vec is not None:
+            move_vec = np.array([cand[0] - current[0], cand[1] - current[1]], dtype=float)
+            n1 = float(np.linalg.norm(prev_vec))
+            n2 = float(np.linalg.norm(move_vec))
+            if n1 > 1e-9 and n2 > 1e-9:
+                cosang = float(np.dot(prev_vec, move_vec) / (n1 * n2))
+                score += w_momentum * cosang
+
         if cand == current:
             score -= stay_penalty
+        if cand in recent:
+            score -= revisit_penalty
         if score > best_score:
             center = ((r0 + r1) // 2, (c0 + c1) // 2)
             best_score = score
@@ -644,9 +904,6 @@ def run_experiment_on_dem(
     dem: np.ndarray,
     args: argparse.Namespace,
 ) -> tuple[np.ndarray, np.ndarray, list[CaptureRecord], int]:
-    if args.dem_npy:
-        pass
-
     cam = CameraModel(
         altitude_m=args.altitude_m,
         fov_deg=args.fov_deg,
@@ -659,7 +916,7 @@ def run_experiment_on_dem(
         configure_rivgraph_import(args.rivgraph_repo)
     print(
         f"[info] DEM shape={dem.shape}, finite_fraction={finite_frac:.3f}, "
-        f"footprint_px={side_px}, extractor={args.channel_extractor}"
+        f"footprint_px={side_px}, extractor={args.channel_extractor}, planner=direct"
     )
     if side_px < 24:
         print(
@@ -674,19 +931,35 @@ def run_experiment_on_dem(
         unseen_frac = 1.0 - float(np.mean(visited[r0:r1, c0:c1]))
         visited[r0:r1, c0:c1] = True
 
-        beta0, beta1, stream_frac = patch_channel_metrics(
+        obs = patch_channel_observation(
             patch,
             resolution_m=args.dem_resolution_m,
             percentile=args.stream_percentile,
             extractor=args.channel_extractor,
             rivgraph_prune_dangling=args.rivgraph_prune_dangling,
         )
+        beta0 = int(obs["beta0"])
+        beta1 = int(obs["beta1"])
+        stream_frac = float(obs["stream_fraction"])
+
+        rec = CaptureRecord(
+            step=step,
+            row=int((r0 + r1) // 2),
+            col=int((c0 + c1) // 2),
+            beta0=beta0,
+            beta1=beta1,
+            stream_fraction=stream_frac,
+            unseen_fraction=unseen_frac,
+            score=0.0,
+        )
+        records.append(rec)
 
         if step < args.steps - 1:
             center, score, _, _, _ = choose_next_location(
                 dem=dem,
                 visited_mask=visited,
                 current=center,
+                records=records,
                 side_px=side_px,
                 resolution_m=args.dem_resolution_m,
                 stream_percentile=args.stream_percentile,
@@ -697,22 +970,16 @@ def run_experiment_on_dem(
                 w_relief=args.w_relief,
                 min_valid_fraction=args.min_valid_fraction,
                 stay_penalty=args.stay_penalty,
+                w_hotspot=args.w_hotspot,
+                w_momentum=args.w_momentum,
+                revisit_penalty=args.revisit_penalty,
+                stagnation_patience=args.stagnation_patience,
+                target_overlap=args.target_overlap,
+                overlap_penalty=args.overlap_penalty,
             )
+            rec.score = float(score)
         else:
-            score = float(beta1)
-
-        records.append(
-            CaptureRecord(
-                step=step,
-                row=int((r0 + r1) // 2),
-                col=int((c0 + c1) // 2),
-                beta0=beta0,
-                beta1=beta1,
-                stream_fraction=stream_frac,
-                unseen_fraction=unseen_frac,
-                score=float(score),
-            )
-        )
+            rec.score = float(beta1)
     return dem, visited, records, side_px
 
 
@@ -756,7 +1023,7 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
         configure_rivgraph_import(args.rivgraph_repo)
     print(
         f"[info] DEM shape={dem.shape}, finite_fraction={finite_frac:.3f}, "
-        f"footprint_px={side_px}, extractor={args.channel_extractor}"
+        f"footprint_px={side_px}, extractor={args.channel_extractor}, planner=direct"
     )
     if side_px < 24:
         print(
@@ -766,9 +1033,9 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
 
     # Live figure state
     plt.ion()
-    fig, ax = plt.subplots(2, 2, figsize=(13, 10), constrained_layout=True)
-    ax00, ax01 = ax[0, 0], ax[0, 1]
-    ax10, ax11 = ax[1, 0], ax[1, 1]
+    fig, ax = plt.subplots(2, 3, figsize=(16, 10), constrained_layout=True)
+    ax00, ax01, ax02 = ax[0, 0], ax[0, 1], ax[0, 2]
+    ax10, ax11, ax12 = ax[1, 0], ax[1, 1], ax[1, 2]
     mdem = np.ma.masked_invalid(dem)
     im0 = ax00.imshow(mdem, cmap="terrain", origin="upper")
     fig.colorbar(im0, ax=ax00, shrink=0.75, label="Elevation")
@@ -787,6 +1054,55 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
     ax01.add_collection(lc_temporal)
     node_scatter = ax01.scatter([], [], c=[], cmap="plasma", s=12, edgecolors="none")
     fig.colorbar(node_scatter, ax=ax01, shrink=0.75, label="Node beta1")
+    ax01.legend(
+        handles=[
+            Line2D([0], [0], color="white", lw=1.2, label="temporal edge"),
+            Line2D([0], [0], color="cyan", lw=1.0, label="proximity edge"),
+        ],
+        loc="lower left",
+        fontsize=8,
+        framealpha=0.7,
+    )
+
+    # Local FOV DEM panel
+    local_dem_img = ax02.imshow(np.zeros((side_px, side_px), dtype=float), cmap="terrain", origin="upper")
+    lc_dem_trunk = LineCollection([], colors="deepskyblue", linewidths=0.9, alpha=0.8)
+    lc_dem_branch = LineCollection([], colors="magenta", linewidths=1.1, alpha=0.85)
+    ax02.add_collection(lc_dem_trunk)
+    ax02.add_collection(lc_dem_branch)
+    dem_nodes = ax02.scatter([], [], c="yellow", s=9, edgecolors="none")
+    ax02.set_title("DEM inside current FOV")
+    ax02.set_axis_off()
+    ax02.legend(
+        handles=[
+            Line2D([0], [0], color="deepskyblue", lw=1.0, label="trunk edge"),
+            Line2D([0], [0], color="magenta", lw=1.0, label="branch edge"),
+            Line2D([0], [0], marker="o", color="yellow", lw=0, markersize=5, label="graph node"),
+        ],
+        loc="lower left",
+        fontsize=8,
+        framealpha=0.7,
+    )
+
+    # Local extracted mask + local graph panel
+    local_mask_img = ax12.imshow(np.zeros((side_px, side_px), dtype=float), cmap="gray", origin="upper", vmin=0.0, vmax=1.0)
+    lc_local_trunk = LineCollection([], colors="deepskyblue", linewidths=0.8, alpha=0.75)
+    lc_local_branch = LineCollection([], colors="magenta", linewidths=1.0, alpha=0.8)
+    ax12.add_collection(lc_local_trunk)
+    ax12.add_collection(lc_local_branch)
+    local_nodes = ax12.scatter([], [], c="yellow", s=8, edgecolors="none")
+    ax12.set_title("Extracted stream mask + local graph")
+    ax12.set_axis_off()
+    ax12.legend(
+        handles=[
+            Line2D([0], [0], color="deepskyblue", lw=1.0, label="trunk edge"),
+            Line2D([0], [0], color="magenta", lw=1.0, label="branch edge"),
+            Line2D([0], [0], marker="o", color="yellow", lw=0, markersize=5, label="graph node"),
+        ],
+        loc="lower left",
+        fontsize=8,
+        framealpha=0.7,
+    )
 
     ax10.set_title("Betti history per capture")
     ax10.set_xlabel("Step")
@@ -819,19 +1135,35 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
         unseen_frac = 1.0 - float(np.mean(visited[r0:r1, c0:c1]))
         visited[r0:r1, c0:c1] = True
 
-        beta0, beta1, stream_frac = patch_channel_metrics(
+        obs = patch_channel_observation(
             patch,
             resolution_m=args.dem_resolution_m,
             percentile=args.stream_percentile,
             extractor=args.channel_extractor,
             rivgraph_prune_dangling=args.rivgraph_prune_dangling,
         )
+        beta0 = int(obs["beta0"])
+        beta1 = int(obs["beta1"])
+        stream_frac = float(obs["stream_fraction"])
+
+        rec = CaptureRecord(
+            step=step,
+            row=int((r0 + r1) // 2),
+            col=int((c0 + c1) // 2),
+            beta0=beta0,
+            beta1=beta1,
+            stream_fraction=stream_frac,
+            unseen_fraction=unseen_frac,
+            score=0.0,
+        )
+        records.append(rec)
 
         if step < args.steps - 1:
             center, score, _, _, _ = choose_next_location(
                 dem=dem,
                 visited_mask=visited,
                 current=center,
+                records=records,
                 side_px=side_px,
                 resolution_m=args.dem_resolution_m,
                 stream_percentile=args.stream_percentile,
@@ -842,21 +1174,16 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
                 w_relief=args.w_relief,
                 min_valid_fraction=args.min_valid_fraction,
                 stay_penalty=args.stay_penalty,
+                w_hotspot=args.w_hotspot,
+                w_momentum=args.w_momentum,
+                revisit_penalty=args.revisit_penalty,
+                stagnation_patience=args.stagnation_patience,
+                target_overlap=args.target_overlap,
+                overlap_penalty=args.overlap_penalty,
             )
+            rec.score = float(score)
         else:
-            score = float(beta1)
-
-        rec = CaptureRecord(
-            step=step,
-            row=int((r0 + r1) // 2),
-            col=int((c0 + c1) // 2),
-            beta0=beta0,
-            beta1=beta1,
-            stream_fraction=stream_frac,
-            unseen_fraction=unseen_frac,
-            score=float(score),
-        )
-        records.append(rec)
+            rec.score = float(beta1)
 
         # Live update
         xs.append(rec.col)
@@ -885,6 +1212,32 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
         ax01.set_title(
             f"Coverage + graph (visited={np.mean(visited):.5f}, "
             f"nodes={len(records)}, edges={len(temporal)+len(proximity)})"
+        )
+
+        # Update local FOV DEM and local extracted channel graph.
+        local_dem = np.ma.masked_invalid(patch)
+        local_dem_img.set_data(local_dem)
+        mask = np.asarray(obs["mask"], dtype=bool)
+        local_mask_img.set_data(mask.astype(float))
+        seg_trunk = obs.get("segments_trunk", [])
+        seg_branch = obs.get("segments_branch", [])
+        lc_dem_trunk.set_segments(seg_trunk if isinstance(seg_trunk, list) else [])
+        lc_dem_branch.set_segments(seg_branch if isinstance(seg_branch, list) else [])
+        lc_local_trunk.set_segments(seg_trunk if isinstance(seg_trunk, list) else [])
+        lc_local_branch.set_segments(seg_branch if isinstance(seg_branch, list) else [])
+        nr = np.asarray(obs["node_rows"], dtype=float)
+        nc = np.asarray(obs["node_cols"], dtype=float)
+        if nr.size > 0:
+            dem_nodes.set_offsets(np.column_stack((nc, nr)))
+            local_nodes.set_offsets(np.column_stack((nc, nr)))
+        else:
+            dem_nodes.set_offsets(np.empty((0, 2)))
+            local_nodes.set_offsets(np.empty((0, 2)))
+        ax02.set_title(
+            f"DEM in FOV ({patch.shape[0]}x{patch.shape[1]})"
+        )
+        ax12.set_title(
+            f"Mask+graph in FOV (beta0={beta0}, beta1={beta1})"
         )
 
         x_axis = np.arange(len(records))
@@ -995,6 +1348,10 @@ def save_animation(
     side_px: int,
     out_dir: Path,
     fps: int,
+    resolution_m: float,
+    stream_percentile: float,
+    channel_extractor: str,
+    rivgraph_prune_dangling: bool,
 ) -> Path:
     """Save adaptive exploration as a matplotlib animation (GIF preferred)."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1006,9 +1363,9 @@ def save_animation(
     visited_prog = np.zeros((nrows, ncols), dtype=bool)
     half = side_px // 2
 
-    fig, ax = plt.subplots(2, 2, figsize=(13, 10), constrained_layout=True)
-    ax00, ax01 = ax[0, 0], ax[0, 1]
-    ax10, ax11 = ax[1, 0], ax[1, 1]
+    fig, ax = plt.subplots(2, 3, figsize=(16, 10), constrained_layout=True)
+    ax00, ax01, ax02 = ax[0, 0], ax[0, 1], ax[0, 2]
+    ax10, ax11, ax12 = ax[1, 0], ax[1, 1], ax[1, 2]
 
     im0 = ax00.imshow(mdem, cmap="terrain", origin="upper")
     path_line, = ax00.plot([], [], "-o", color="black", ms=3, lw=1, alpha=0.9)
@@ -1027,6 +1384,53 @@ def save_animation(
     ax01.add_collection(lc_temporal)
     node_scatter = ax01.scatter([], [], c=[], cmap="plasma", s=12, edgecolors="none")
     fig.colorbar(node_scatter, ax=ax01, shrink=0.75, label="Node beta1")
+    ax01.legend(
+        handles=[
+            Line2D([0], [0], color="white", lw=1.2, label="temporal edge"),
+            Line2D([0], [0], color="cyan", lw=1.0, label="proximity edge"),
+        ],
+        loc="lower left",
+        fontsize=8,
+        framealpha=0.7,
+    )
+
+    local_dem_img = ax02.imshow(np.zeros((side_px, side_px), dtype=float), cmap="terrain", origin="upper")
+    lc_dem_trunk = LineCollection([], colors="deepskyblue", linewidths=0.9, alpha=0.8)
+    lc_dem_branch = LineCollection([], colors="magenta", linewidths=1.1, alpha=0.85)
+    ax02.add_collection(lc_dem_trunk)
+    ax02.add_collection(lc_dem_branch)
+    dem_nodes = ax02.scatter([], [], c="yellow", s=9, edgecolors="none")
+    ax02.set_title("DEM inside current FOV")
+    ax02.set_axis_off()
+    ax02.legend(
+        handles=[
+            Line2D([0], [0], color="deepskyblue", lw=1.0, label="trunk edge"),
+            Line2D([0], [0], color="magenta", lw=1.0, label="branch edge"),
+            Line2D([0], [0], marker="o", color="yellow", lw=0, markersize=5, label="graph node"),
+        ],
+        loc="lower left",
+        fontsize=8,
+        framealpha=0.7,
+    )
+
+    local_mask_img = ax12.imshow(np.zeros((side_px, side_px), dtype=float), cmap="gray", origin="upper", vmin=0.0, vmax=1.0)
+    lc_local_trunk = LineCollection([], colors="deepskyblue", linewidths=0.8, alpha=0.75)
+    lc_local_branch = LineCollection([], colors="magenta", linewidths=1.0, alpha=0.8)
+    ax12.add_collection(lc_local_trunk)
+    ax12.add_collection(lc_local_branch)
+    local_nodes = ax12.scatter([], [], c="yellow", s=8, edgecolors="none")
+    ax12.set_title("Extracted stream mask + local graph")
+    ax12.set_axis_off()
+    ax12.legend(
+        handles=[
+            Line2D([0], [0], color="deepskyblue", lw=1.0, label="trunk edge"),
+            Line2D([0], [0], color="magenta", lw=1.0, label="branch edge"),
+            Line2D([0], [0], marker="o", color="yellow", lw=0, markersize=5, label="graph node"),
+        ],
+        loc="lower left",
+        fontsize=8,
+        framealpha=0.7,
+    )
 
     ax10.set_title("Betti history per capture")
     ax10.set_xlabel("Step")
@@ -1090,6 +1494,36 @@ def save_animation(
             f"nodes={len(sub_records)}, edges={len(temporal)+len(proximity)})"
         )
 
+        patch, _ = capture_square(dem, rec.row, rec.col, side_px=side_px)
+        obs = patch_channel_observation(
+            patch,
+            resolution_m=resolution_m,
+            percentile=stream_percentile,
+            extractor=channel_extractor,
+            rivgraph_prune_dangling=rivgraph_prune_dangling,
+        )
+        local_dem_img.set_data(np.ma.masked_invalid(patch))
+        mask = np.asarray(obs["mask"], dtype=bool)
+        local_mask_img.set_data(mask.astype(float))
+        seg_trunk = obs.get("segments_trunk", [])
+        seg_branch = obs.get("segments_branch", [])
+        lc_dem_trunk.set_segments(seg_trunk if isinstance(seg_trunk, list) else [])
+        lc_dem_branch.set_segments(seg_branch if isinstance(seg_branch, list) else [])
+        lc_local_trunk.set_segments(seg_trunk if isinstance(seg_trunk, list) else [])
+        lc_local_branch.set_segments(seg_branch if isinstance(seg_branch, list) else [])
+        nr = np.asarray(obs["node_rows"], dtype=float)
+        nc = np.asarray(obs["node_cols"], dtype=float)
+        if nr.size > 0:
+            dem_nodes.set_offsets(np.column_stack((nc, nr)))
+            local_nodes.set_offsets(np.column_stack((nc, nr)))
+        else:
+            dem_nodes.set_offsets(np.empty((0, 2)))
+            local_nodes.set_offsets(np.empty((0, 2)))
+        ax02.set_title(f"DEM in FOV ({patch.shape[0]}x{patch.shape[1]})")
+        ax12.set_title(
+            f"Mask+graph in FOV (beta0={int(obs['beta0'])}, beta1={int(obs['beta1'])})"
+        )
+
         beta0_line.set_data(t[: frame_idx + 1], beta0[: frame_idx + 1])
         beta1_line.set_data(t[: frame_idx + 1], beta1[: frame_idx + 1])
         score_line.set_data(t[: frame_idx + 1], score[: frame_idx + 1])
@@ -1104,6 +1538,14 @@ def save_animation(
             lc_temporal,
             lc_prox,
             node_scatter,
+            local_dem_img,
+            lc_dem_trunk,
+            lc_dem_branch,
+            dem_nodes,
+            local_mask_img,
+            lc_local_trunk,
+            lc_local_branch,
+            local_nodes,
             beta0_line,
             beta1_line,
             score_line,
@@ -1215,6 +1657,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--w-beta1", type=float, default=2.5)
     p.add_argument("--w-unseen", type=float, default=1.5)
     p.add_argument("--w-relief", type=float, default=0.7)
+    p.add_argument("--w-hotspot", type=float, default=1.2)
+    p.add_argument("--w-momentum", type=float, default=0.35)
+    p.add_argument("--revisit-penalty", type=float, default=0.5)
+    p.add_argument("--stagnation-patience", type=int, default=10)
+    p.add_argument(
+        "--target-overlap",
+        type=float,
+        default=0.5,
+        help="Desired overlap fraction between consecutive square FOV captures.",
+    )
+    p.add_argument(
+        "--overlap-penalty",
+        type=float,
+        default=1.2,
+        help="Penalty weight for deviating from --target-overlap during move scoring.",
+    )
     p.add_argument("--min-valid-fraction", type=float, default=0.6)
     p.add_argument("--stay-penalty", type=float, default=0.25)
     p.add_argument("--graph-radius-px", type=float, default=160.0)
@@ -1266,6 +1724,10 @@ def main() -> None:
             side_px=side_px,
             out_dir=out_dir,
             fps=max(1, int(args.animation_fps)),
+            resolution_m=args.dem_resolution_m,
+            stream_percentile=args.stream_percentile,
+            channel_extractor=args.channel_extractor,
+            rivgraph_prune_dangling=args.rivgraph_prune_dangling,
         )
     csv_path = write_csv(records, out_dir=out_dir)
 

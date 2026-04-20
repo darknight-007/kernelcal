@@ -214,6 +214,9 @@ Key capabilities:
   - `--channel-extractor rivgraph` (mask -> RivGraph skeleton -> links/nodes -> graph Betti)
 - Frontier/hotspot pursuit controls:
   - `--w-hotspot`, `--w-momentum`, `--revisit-penalty`, `--stagnation-patience`
+- FOV overlap control between consecutive captures:
+  - `--target-overlap` (default `0.5`)
+  - `--overlap-penalty` (higher value enforces overlap target more strongly)
 
 Phoenix/Tonto example (HydroSHEDS 3 arc-second):
 
@@ -232,6 +235,8 @@ python3 drone_dem_betti_adaptive_experiment.py \
     --w-momentum 0.45 \
     --revisit-penalty 0.8 \
     --stagnation-patience 8 \
+    --target-overlap 0.5 \
+    --overlap-penalty 1.2 \
     --realtime \
     --realtime-pause-s 0.03 \
     --realtime-block \
@@ -252,6 +257,8 @@ python3 drone_dem_betti_adaptive_experiment.py \
     --channel-extractor rivgraph \
     --rivgraph-prune-dangling \
     --rivgraph-repo /absolute/path/to/RivGraph \
+    --target-overlap 0.5 \
+    --overlap-penalty 1.2 \
     --output-dir "datasets/hydroshed-dem/drone_betti_rivgraph"
 ```
 
