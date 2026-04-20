@@ -61,32 +61,18 @@ from scipy.sparse.csgraph import connected_components, laplacian
 from scipy.sparse.linalg import eigsh
 from scipy.spatial import cKDTree
 
+# Shared lon/lat -> local metres projection lives in the kernelcal package
+# so this script, the drone-DEM explorer, and any future examples share the
+# same implementation instead of redefining it. Imported names are kept at
+# module scope for back-compat with callers such as ``tests/test_bishop_rocks_explorer.py``
+# that reach for ``bishop_rocks_graph_explorer.LocalFrame``.
+from kernelcal.geo3d import METERS_PER_DEG_LAT, LocalFrame  # noqa: F401
+
 HERE = Path(__file__).resolve().parent
 # Matches sibling scripts (``bishop_kernelcal.py``, ``bishop_trait_analysis.py``):
 # rock centroids + per-rock traits CSVs live under ``datasets/bishop_scarp/``.
 DEFAULT_DATA_DIR = HERE / "datasets" / "bishop_scarp"
 DEFAULT_OUT_DIR = HERE / "bishop_figures" / "rocks_explorer"
-
-
-# ---------------------------------------------------------------------------
-# Geo → local metres projection
-# ---------------------------------------------------------------------------
-
-METERS_PER_DEG_LAT = 111_320.0
-
-
-@dataclass(frozen=True)
-class LocalFrame:
-    """Equirectangular projection around a central lat (good for <50 km regions)."""
-
-    lon0: float
-    lat0: float
-
-    def to_xy(self, lon: np.ndarray, lat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        lat_rad = np.deg2rad(self.lat0)
-        x = (lon - self.lon0) * METERS_PER_DEG_LAT * np.cos(lat_rad)
-        y = (lat - self.lat0) * METERS_PER_DEG_LAT
-        return x.astype(float), y.astype(float)
 
 
 # ---------------------------------------------------------------------------

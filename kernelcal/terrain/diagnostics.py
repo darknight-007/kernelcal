@@ -20,33 +20,12 @@ from __future__ import annotations
 import numpy as np
 from dataclasses import dataclass
 
-
-# ---------------------------------------------------------------------------
-# Spectral entropy
-# ---------------------------------------------------------------------------
-
-def spectral_entropy(h: np.ndarray) -> float:
-    """Spectral entropy H[h] = -Σ h̄_l log h̄_l.
-
-    h̄_l = h_l / Σ_l' h_l' is the normalised spectral weight.
-    H[h] ∈ [0, log N]:
-      - H = log N : maximally diffuse kernel (flat terrain, vacuum solution)
-      - H → 0    : kernel mass concentrated at a single mode (phase transition)
-
-    Parameters
-    ----------
-    h : (N,) float array — spectral transfer function values (positive)
-
-    Returns
-    -------
-    float — spectral entropy in nats
-    """
-    h = np.asarray(h, dtype=float)
-    pos = h[h > 0]
-    if len(pos) == 0:
-        return 0.0
-    h_bar = pos / pos.sum()
-    return float(-np.sum(h_bar * np.log(h_bar)))
+# Re-export the canonical spectral-entropy helper so historical callers of
+# ``kernelcal.terrain.diagnostics.spectral_entropy`` continue to resolve
+# unchanged. Zero entries contribute nothing either way (dropping them
+# first vs. masking them with log(1)=0 both give the same number), so the
+# numerical behavior is identical to the previous terrain-local version.
+from ..spectral.entropy import spectral_entropy  # noqa: F401  (public re-export)
 
 
 def spectral_entropy_from_laplacian(

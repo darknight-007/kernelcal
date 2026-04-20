@@ -10,6 +10,7 @@ This subpackage provides compact spectral encodings for:
 """
 
 from .graph3d import adjacency_to_laplacian, knn_symmetric_adjacency, subsample_points
+from .local_frame import METERS_PER_DEG_LAT, LocalFrame
 from .hodge import (
     HodgeSpectralBasis,
     betti_numbers,
@@ -92,6 +93,9 @@ __all__ = [
     "subsample_points",
     "knn_symmetric_adjacency",
     "adjacency_to_laplacian",
+    # local_frame
+    "LocalFrame",
+    "METERS_PER_DEG_LAT",
     # spectral_codec
     "CompressedSpectralKernel",
     "compress_point_cloud",

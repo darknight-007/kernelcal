@@ -327,17 +327,14 @@ def load_edf_optional(
 # ---------------------------------------------------------------------------
 
 def _normalised_spectral_entropy(eigvals: np.ndarray) -> float:
-    """H[p] / log N where p = eigvals / sum(eigvals).  Returns 0 if all zero."""
-    s = eigvals.sum()
-    if s <= 0:
-        return 0.0
-    p = eigvals / s
-    p = np.where(p > 0, p, 1.0)  # log(1)=0 masks zeros
-    H = float(-np.sum(p * np.log(p)))
-    N = eigvals.size
-    if N <= 1:
-        return 0.0
-    return H / np.log(N)
+    """H[p] / log N where p = eigvals / sum(eigvals).  Returns 0 if all zero.
+
+    Thin wrapper around :func:`kernelcal.spectral.entropy.spectral_entropy`
+    with ``normalize=True``, kept private for module-local call sites.
+    """
+    from ..spectral.entropy import spectral_entropy
+
+    return spectral_entropy(eigvals, normalize=True)
 
 
 def _lookup_stage(

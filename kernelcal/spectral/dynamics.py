@@ -73,18 +73,11 @@ def geodesic(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
     return np.exp(np.asarray(a, dtype=float) + np.asarray(b, dtype=float) * t)
 
 
-def spectral_entropy(h: np.ndarray) -> float:
-    """Normalised spectral entropy H[h_t] = −∑_l h̄_l log h̄_l.  (Remark 8 / Eq. 14)
-
-    h̄_l = h(λ_l) / Σ_{l'} h(λ_{l'}) is the normalised spectral weight.
-    Entropy is maximal when all modes have equal weight and decreases as
-    spectral mass concentrates, providing an early-warning signal for
-    network fragmentation (λ_1 → 0).
-    """
-    h = np.asarray(h, dtype=float)
-    h_bar = h / h.sum()
-    h_bar = np.where(h_bar > 0, h_bar, 1.0)  # avoid log(0)
-    return float(-np.sum(h_bar * np.log(h_bar)))
+# Re-export the canonical spectral-entropy helper. See module
+# ``kernelcal.spectral.entropy`` for the full implementation / docstring.
+# Historical callers that do ``from kernelcal.spectral.dynamics import
+# spectral_entropy`` continue to work because the name is bound here.
+from .entropy import spectral_entropy  # noqa: F401  (public re-export)
 
 
 def hessian_matrix(

@@ -47,6 +47,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from ..kernel.space import hilbert_schmidt_distance
+
 
 # ---------------------------------------------------------------------------
 # Kernel matrix utilities
@@ -508,15 +510,13 @@ def hs_distance(k1: AnisotropicSEKernel, k2: AnisotropicSEKernel,
                 X_ref: np.ndarray) -> float:
     """Hilbert-Schmidt distance between two kernels evaluated on reference points.
 
-    d_HS(k1, k2) = || K1 - K2 ||_F / sqrt(n)
-
-    where K1, K2 are the n×n Gram matrices (no noise) at X_ref.
+    Builds the noise-free Gram matrices ``K1``, ``K2`` at ``X_ref`` and
+    delegates to :func:`kernelcal.kernel.space.hilbert_schmidt_distance`,
+    i.e. ``|| K1 - K2 ||_F / sqrt(n)`` with ``n = len(X_ref)``.
     """
     K1 = k1.K(X_ref, add_noise=False)
     K2 = k2.K(X_ref, add_noise=False)
-    diff = K1 - K2
-    n = len(X_ref)
-    return float(np.linalg.norm(diff, "fro") / np.sqrt(n))
+    return hilbert_schmidt_distance(K1, K2)
 
 
 def fisher_rao_distance(k1: AnisotropicSEKernel,
