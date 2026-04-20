@@ -1368,7 +1368,18 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
     ax00, ax01, ax02 = ax[0, 0], ax[0, 1], ax[0, 2]
     ax10, ax11, ax12 = ax[1, 0], ax[1, 1], ax[1, 2]
     mdem = np.ma.masked_invalid(dem)
-    im0 = ax00.imshow(mdem, cmap="terrain", origin="upper")
+    # Lock the elevation colormap limits to the full DEM range so the FoV
+    # panel (ax02) uses the *same* colors as the global DEM panel (ax00).
+    finite_dem = dem[np.isfinite(dem)]
+    if finite_dem.size:
+        dem_vmin = float(np.nanpercentile(finite_dem, 1.0))
+        dem_vmax = float(np.nanpercentile(finite_dem, 99.0))
+        if dem_vmax <= dem_vmin:
+            dem_vmin, dem_vmax = float(finite_dem.min()), float(finite_dem.max()) + 1e-6
+    else:
+        dem_vmin, dem_vmax = 0.0, 1.0
+    im0 = ax00.imshow(mdem, cmap="terrain", origin="upper",
+                       vmin=dem_vmin, vmax=dem_vmax)
     fig.colorbar(im0, ax=ax00, shrink=0.75, label="Elevation")
     ax00.set_title("DEM with live drone path")
     ax00.set_axis_off()
@@ -1395,8 +1406,12 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
         framealpha=0.7,
     )
 
-    # Local FOV DEM panel
-    local_dem_img = ax02.imshow(np.zeros((side_px, side_px), dtype=float), cmap="terrain", origin="upper")
+    # Local FOV DEM panel — share elevation colormap limits with ax00 so the
+    # per-patch colors match the global DEM rather than auto-scaling each frame.
+    local_dem_placeholder = np.ma.masked_all((side_px, side_px), dtype=float)
+    local_dem_img = ax02.imshow(local_dem_placeholder, cmap="terrain",
+                                 origin="upper", vmin=dem_vmin, vmax=dem_vmax)
+    fig.colorbar(local_dem_img, ax=ax02, shrink=0.75, label="Elevation")
     lc_dem_graph = LineCollection([], linewidths=1.0, alpha=0.9)
     ax02.add_collection(lc_dem_graph)
     dem_nodes = ax02.scatter([], [], s=9, edgecolors="none")
@@ -1719,7 +1734,18 @@ def save_animation(
     ax00, ax01, ax02 = ax[0, 0], ax[0, 1], ax[0, 2]
     ax10, ax11, ax12 = ax[1, 0], ax[1, 1], ax[1, 2]
 
-    im0 = ax00.imshow(mdem, cmap="terrain", origin="upper")
+    # Lock the elevation colormap limits to the full DEM range so the FoV
+    # panel (ax02) uses the *same* colors as the global DEM panel (ax00).
+    finite_dem = dem[np.isfinite(dem)]
+    if finite_dem.size:
+        dem_vmin = float(np.nanpercentile(finite_dem, 1.0))
+        dem_vmax = float(np.nanpercentile(finite_dem, 99.0))
+        if dem_vmax <= dem_vmin:
+            dem_vmin, dem_vmax = float(finite_dem.min()), float(finite_dem.max()) + 1e-6
+    else:
+        dem_vmin, dem_vmax = 0.0, 1.0
+    im0 = ax00.imshow(mdem, cmap="terrain", origin="upper",
+                       vmin=dem_vmin, vmax=dem_vmax)
     path_line, = ax00.plot([], [], "-o", color="black", ms=3, lw=1, alpha=0.9)
     fov_rect = Rectangle((0, 0), side_px, side_px, linewidth=1.2, edgecolor="white", facecolor="none")
     ax00.add_patch(fov_rect)
@@ -1746,7 +1772,11 @@ def save_animation(
         framealpha=0.7,
     )
 
-    local_dem_img = ax02.imshow(np.zeros((side_px, side_px), dtype=float), cmap="terrain", origin="upper")
+    # Local FOV DEM panel — share elevation colormap limits with ax00.
+    local_dem_placeholder = np.ma.masked_all((side_px, side_px), dtype=float)
+    local_dem_img = ax02.imshow(local_dem_placeholder, cmap="terrain",
+                                 origin="upper", vmin=dem_vmin, vmax=dem_vmax)
+    fig.colorbar(local_dem_img, ax=ax02, shrink=0.75, label="Elevation")
     lc_dem_graph = LineCollection([], linewidths=1.0, alpha=0.9)
     ax02.add_collection(lc_dem_graph)
     dem_nodes = ax02.scatter([], [], s=9, edgecolors="none")

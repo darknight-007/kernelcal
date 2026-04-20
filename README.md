@@ -206,7 +206,12 @@ Key capabilities:
 - Live matplotlib mode (`--realtime`) and export animation (`.gif`/`.mp4`)
 - Exploration graph rendering (temporal + proximity edges), with legends
 - Per-step local diagnostics:
-  - DEM inside current FOV
+  - DEM inside current FOV, rendered with the **same `terrain` colormap and
+    shared elevation limits** (1–99th percentile of the full DEM) as the
+    global `DEM with live drone path` panel, so valley/ridge colors are
+    directly comparable between the two panels instead of each FoV patch
+    auto-scaling to its own local min/max. The FoV panel also carries its
+    own `Elevation` colorbar.
   - extracted stream mask
   - local channel graph overlaid on DEM and mask panels, with **continuous graph
     sections colored by connected component** (`tab20` colormap), plus
