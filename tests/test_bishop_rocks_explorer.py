@@ -22,8 +22,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+# The explorer script lives under ``examples/bishop/`` after PR-E; add that
+# directory to sys.path so ``importorskip`` can find the module by basename.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "examples" / "bishop"))
 
 bishop = pytest.importorskip("bishop_rocks_graph_explorer")
 

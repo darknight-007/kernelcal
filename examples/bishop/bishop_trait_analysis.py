@@ -31,7 +31,7 @@ import matplotlib.gridspec as gridspec
 from scipy.spatial import cKDTree
 from scipy.sparse.linalg import eigsh
 
-KCAL_ROOT = Path(__file__).parent
+KCAL_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(KCAL_ROOT))
 from kernelcal.terrain.diagnostics import (
     spectral_entropy_from_laplacian,
@@ -41,8 +41,8 @@ from kernelcal.terrain.diagnostics import (
 )
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
-BASE     = Path(__file__).parent / 'datasets' / 'bishop_scarp'
-FIG_DIR  = Path(__file__).parent / 'bishop_figures'
+BASE     = Path(__file__).resolve().parent.parent.parent / 'datasets' / 'bishop_scarp'
+FIG_DIR  = Path(__file__).resolve().parent.parent.parent / 'bishop_figures'
 FIG_DIR.mkdir(exist_ok=True)
 
 N_SCARP  = 2000   # subsample from scarp rocks (13,701)

@@ -51,7 +51,7 @@ if not OBJ.exists():
     )
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from kernelcal.geo3d.large_mesh import (
     compress_large_mesh_nystrom,

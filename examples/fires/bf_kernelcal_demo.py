@@ -52,7 +52,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 # ── kernelcal ──────────────────────────────────────────────────────────────
-KCAL_ROOT = Path(__file__).parent
+KCAL_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(KCAL_ROOT))
 from kernelcal.terrain.diagnostics import (
     spectral_entropy_from_laplacian,
@@ -62,7 +62,7 @@ from kernelcal.terrain.diagnostics import (
 )
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
-DATA_DIR = Path(__file__).parent / 'datasets' / 'bf_mbtiles'
+DATA_DIR = Path(__file__).resolve().parent.parent.parent / 'datasets' / 'bf_mbtiles'
 N_MAX    = 600    # max centroids after subsampling (dense N x N eigendecomp)
 K_NN     = 6     # neighbours for graph construction
 SIGMA_M  = 8.0   # RBF bandwidth [metres] for edge weights

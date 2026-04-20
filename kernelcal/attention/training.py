@@ -420,7 +420,11 @@ def run_ensemble_experiment(
     return result
 
 
-def _main() -> None:
+def main() -> None:
+    """Console-script entry point for the transformer-training MaxCal experiment.
+
+    Wired to ``kernelcal-attention-training`` in ``pyproject.toml``.
+    """
     import argparse
     parser = argparse.ArgumentParser(
         description="MaxCal diagnostics during toy transformer training.")
@@ -463,5 +467,10 @@ def _main() -> None:
         )
 
 
+# Back-compat alias — earlier revisions exported this CLI as the private
+# ``_main``.  Kept so any external caller that reaches in keeps working.
+_main = main
+
+
 if __name__ == '__main__':
-    _main()
+    main()

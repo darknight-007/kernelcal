@@ -34,7 +34,7 @@ import rasterio
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 
-KCAL_ROOT = Path(__file__).parent
+KCAL_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR  = KCAL_ROOT / 'datasets' / 'bf_mbtiles'
 OUT_DIR   = KCAL_ROOT / 'geotiffs'
 OUT_DIR.mkdir(exist_ok=True)

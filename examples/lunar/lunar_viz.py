@@ -33,7 +33,7 @@ from matplotlib.cm import ScalarMappable
 import matplotlib.ticker as mticker
 from PIL import Image
 
-KCAL_ROOT = Path(__file__).parent
+KCAL_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(KCAL_ROOT))
 from kernelcal.terrain.diagnostics import (
     spectral_entropy, fixed_point_kernel, fiedler_mode_gap,

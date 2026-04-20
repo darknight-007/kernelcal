@@ -30,7 +30,7 @@ from matplotlib.colors import Normalize, LogNorm
 from matplotlib.cm import ScalarMappable
 from scipy.spatial import cKDTree
 
-KCAL_ROOT = Path(__file__).parent
+KCAL_ROOT = Path(__file__).resolve().parent.parent.parent
 FIG_DIR   = KCAL_ROOT / 'figures'
 DATA_DIR  = KCAL_ROOT / 'datasets' / 'bf_mbtiles'
 FIG_DIR.mkdir(exist_ok=True)

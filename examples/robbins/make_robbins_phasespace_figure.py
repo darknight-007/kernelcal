@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import matplotlib.ticker as mticker
 
-OUT = (Path(__file__).parent.parent /
+OUT = (Path(__file__).resolve().parent.parent.parent.parent /
        'P4-journal-spectral-kernel-biosignature-planetary-surfaces' /
        'figures' / 'fig_robbins_phasespace.png')
 

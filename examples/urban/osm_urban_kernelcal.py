@@ -49,7 +49,7 @@ from matplotlib.colors import Normalize, LogNorm
 from matplotlib.cm import ScalarMappable
 
 # ── kernelcal ──────────────────────────────────────────────────────────────
-KCAL_ROOT = Path(__file__).parent
+KCAL_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(KCAL_ROOT))
 from kernelcal.terrain.diagnostics import (
     spectral_entropy,
@@ -60,8 +60,8 @@ from kernelcal.terrain.diagnostics import (
 from kernelcal.urban.city_graph import fetch_buildings, buildings_to_graph, CityGraph
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────
-CACHE_DIR = Path(__file__).parent / 'urban_cache'
-FIG_DIR   = Path(__file__).parent / 'urban_figures'
+CACHE_DIR = Path(__file__).resolve().parent.parent.parent / 'urban_cache'
+FIG_DIR   = Path(__file__).resolve().parent.parent.parent / 'urban_figures'
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
 N_MAX     = 2000    # nodes per city (full run)

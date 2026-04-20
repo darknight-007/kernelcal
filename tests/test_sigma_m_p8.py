@@ -24,8 +24,10 @@ from kernelcal.spectral import (
     SpectralKernelDynamics,
 )
 
-# Import from the repo-root one-pager.
-from sigma_m_p8 import (
+# Canonical location: kernelcal.thermodynamics.sigma_m_p8.
+# (A root-level ``sigma_m_p8`` shim is still kept for back-compat, but
+# tests import from the package path directly.)
+from kernelcal.thermodynamics.sigma_m_p8 import (
     MU2_DEFAULT,
     N_MODES_DEFAULT,
     P_M_TARGET,

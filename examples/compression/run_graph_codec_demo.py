@@ -35,7 +35,7 @@ from typing import Literal, cast
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from kernelcal.terrain.dem import TerrainGraph, dem_to_graph, synthetic_channel_dem, terrain_graph_laplacian

@@ -74,7 +74,7 @@ def add_wall_power(
     # Regenerate figures with wall-power panel
     try:
         import sys
-        sys.path.insert(0, str(Path(__file__).parent))
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
         from kernelcal.attention.landauer import _generate_landauer_figures_wall
         _generate_landauer_figures_wall(results, base)
     except Exception:

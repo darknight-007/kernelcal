@@ -17,6 +17,30 @@ rivgraph_analysis_results/
 tests/figures/
 examples/*/figures/
 
+# Root-level *_figures/ dirs — historically written by the experiment
+# scripts that now live under examples/<category>/.  The scripts still
+# resolve these at the repo root (see path-bump in PR-E).  We do NOT
+# commit the generated PNG/PDF output; regenerate by re-running the
+# corresponding script.
+/*_figures
+/geotiffs
+
+# Exceptions: the handful of figure files that README.md references
+# inline, so the rendered README on GitHub doesn't show broken images.
+# Every intermediate directory must be re-included explicitly, and every
+# level must then be re-ignored to keep its other children out.
+!/drone_dem_figures
+/drone_dem_figures/*
+!/drone_dem_figures/explorer
+/drone_dem_figures/explorer/*
+!/drone_dem_figures/explorer/drone_dem_explorer_live.png
+
+!/bishop_figures
+/bishop_figures/*
+!/bishop_figures/rocks_explorer
+/bishop_figures/rocks_explorer/*
+!/bishop_figures/rocks_explorer/bishop_rocks_explorer_live.png
+
 *.py[cod]
 *.pyo
 *.pyd

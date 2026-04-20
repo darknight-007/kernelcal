@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import zoom
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from scipy import sparse as sp

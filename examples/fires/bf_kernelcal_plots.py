@@ -36,7 +36,7 @@ from matplotlib.cm import ScalarMappable
 from scipy.spatial import cKDTree
 
 # ── kernelcal ──────────────────────────────────────────────────────────────
-KCAL_ROOT = Path(__file__).parent
+KCAL_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(KCAL_ROOT))
 from kernelcal.terrain.diagnostics import (
     spectral_entropy_from_laplacian,
@@ -46,8 +46,8 @@ from kernelcal.terrain.diagnostics import (
 )
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
-DATA_DIR  = Path(__file__).parent / 'datasets' / 'bf_mbtiles'
-FIG_DIR   = Path(__file__).parent / 'figures'
+DATA_DIR  = Path(__file__).resolve().parent.parent.parent / 'datasets' / 'bf_mbtiles'
+FIG_DIR   = Path(__file__).resolve().parent.parent.parent / 'figures'
 FIG_DIR.mkdir(exist_ok=True)
 
 N_MAX    = 600

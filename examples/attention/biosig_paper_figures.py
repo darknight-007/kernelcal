@@ -38,7 +38,7 @@ import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 import matplotlib.ticker as mticker
 
-KCAL_ROOT = Path(__file__).parent
+KCAL_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(KCAL_ROOT))
 from kernelcal.terrain.diagnostics import (
     spectral_entropy,
