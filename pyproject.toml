@@ -39,6 +39,15 @@ transformers = ["torch>=2.0", "transformers>=4.35", "accelerate>=0.24"]
 geo3d        = ["trimesh>=4.0", "pycollada>=0.9"]
 dev          = ["pytest>=7.0", "torch>=2.0", "transformers>=4.35", "matplotlib>=3.7", "pillow>=10.0"]
 
+# Console-script entry points. Each target must be importable as
+# ``module:callable`` and take no required arguments (argparse handles argv).
+# See the PR-C refactor notes for why only package-resident CLIs are
+# registered here; root-level experiment scripts move into the package in
+# a later PR (PR-E reorg) and will be registered then.
+[project.scripts]
+kernelcal-rivgraph-bridge = "kernelcal.integrations.rivgraph:main"
+kernelcal-landauer        = "kernelcal.attention.landauer:main"
+
 [project.urls]
 Homepage              = "https://github.com/darknight-007/kernelcal"
 Paper                 = "https://arxiv.org/abs/2603.27880"

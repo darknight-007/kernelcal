@@ -608,7 +608,13 @@ def _generate_landauer_figures(results: list, out: Path) -> None:
 
 # ── CLI ──────────────────────────────────────────────────────────────────
 
-def _main() -> None:
+def main() -> None:
+    """Console-script entry point for the Landauer bound experiment.
+
+    Wired to ``kernelcal-landauer`` in ``pyproject.toml`` and to the
+    ``python -m kernelcal.attention.landauer`` invocation used by
+    ``Dockerfile.landauer``.
+    """
     import argparse
     parser = argparse.ArgumentParser(description='Landauer bound experiment for transformer training.')
     parser.add_argument('--widths', type=int, nargs='+', default=[128, 256, 512, 1024])
@@ -630,5 +636,11 @@ def _main() -> None:
     )
 
 
+# Back-compat alias: earlier revisions of this module exposed the CLI
+# as the private ``_main``. Kept as an alias so any external callers or
+# internal reach-ins continue to work.
+_main = main
+
+
 if __name__ == '__main__':
-    _main()
+    main()
