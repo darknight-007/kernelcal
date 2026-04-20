@@ -192,6 +192,64 @@ obs = observability_ratio(R_bps=2e5, P_phys_W=1e7, T_K=250.0)  # Mars dust devil
 print(f"log₁₀(R/İself) = {obs['log10_ratio']:.1f}  regime: {obs['regime']}")
 ```
 
+### Drone DEM adaptive mapping (`drone_dem_betti_adaptive_experiment.py`)
+
+Realtime drone-style exploration over DEM tiles with a square camera footprint
+derived from altitude/FOV, Betti-aware waypoint selection, and optional
+RivGraph-based channel extraction.
+
+Key capabilities:
+
+- DEM input via `--dem-tiff` or `--dem-npy`
+- Geographic crop via DeepGIS-friendly `--bbox-lonlat="lon_min,lat_min,lon_max,lat_max"`
+- Adaptive objective on per-capture topology (`beta0`, `beta1`) + unseen area + relief
+- Live matplotlib mode (`--realtime`) and export animation (`.gif`/`.mp4`)
+- Exploration graph rendering (temporal + proximity edges)
+- Channel extraction backend switch:
+  - `--channel-extractor simple` (D8 + accumulation mask + binary Betti)
+  - `--channel-extractor rivgraph` (mask -> RivGraph skeleton -> links/nodes -> graph Betti)
+
+Phoenix/Tonto example (HydroSHEDS 3 arc-second):
+
+```bash
+python3 drone_dem_betti_adaptive_experiment.py \
+    --dem-tiff "datasets/hydroshed-dem/na_con_3s/na_con_3s.tif" \
+    --bbox-lonlat="-112.6,33.2,-110.6,34.3" \
+    --bbox-crop-name "phoenix_tonto_bbox.tif" \
+    --nodata-value 32767 \
+    --dem-resolution-m 90 \
+    --altitude-m 8000 \
+    --fov-deg 60 \
+    --steps 200 \
+    --realtime \
+    --realtime-pause-s 0.03 \
+    --realtime-block \
+    --output-dir "datasets/hydroshed-dem/drone_betti_realtime"
+```
+
+RivGraph extractor mode:
+
+```bash
+python3 drone_dem_betti_adaptive_experiment.py \
+    --dem-tiff "datasets/hydroshed-dem/na_con_3s/na_con_3s.tif" \
+    --bbox-lonlat="-112.6,33.2,-110.6,34.3" \
+    --nodata-value 32767 \
+    --dem-resolution-m 90 \
+    --altitude-m 8000 \
+    --fov-deg 60 \
+    --steps 120 \
+    --channel-extractor rivgraph \
+    --rivgraph-prune-dangling \
+    --rivgraph-repo /absolute/path/to/RivGraph \
+    --output-dir "datasets/hydroshed-dem/drone_betti_rivgraph"
+```
+
+Outputs are written under `--output-dir`:
+
+- `drone_betti_adaptive_summary.png`
+- `drone_betti_adaptive_animation.gif` (or `.mp4` fallback, unless `--no-animation`)
+- `capture_metrics.csv`
+
 ### MaxCal adaptive sampler
 
 Replaces the heuristic update in the [DeepGIS World Sampler](https://github.com/Earth-Innovation-Hub/deepgis-xr) with a principled MaxCal rule:
