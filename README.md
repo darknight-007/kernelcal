@@ -194,9 +194,9 @@ print(f"log₁₀(R/İself) = {obs['log10_ratio']:.1f}  regime: {obs['regime']}"
 
 ### Drone DEM adaptive mapping (`examples/controller/drone_dem_betti_adaptive_experiment.py`)
 
-![Drone DEM adaptive mapping — realtime run, step 52/200, FoV 53x53, global DEM and `DEM in FOV` panels share the `terrain` colormap and elevation limits; bottom-right shows the mask+graph with β₀=8, β₁=0, Fiedler=0, 8 components](drone_dem_figures/explorer/drone_dem_explorer_live.png)
+![Drone DEM adaptive mapping — realtime run, step 200/200, FoV 51x51, full DEM path + coverage graph + DEM in FoV + topology/diagnostics + mask+graph panels](drone_dem_figures/explorer/drone_dem_explorer_live.png)
 
-*Realtime run at step 52/200 on the Phoenix/Tonto HydroSHEDS tile. **(0,0)** full DEM with the live drone path. **(0,1)** coverage + exploration graph (temporal white edges, proximity cyan edges, node color = β₁). **(0,2)** DEM inside the current FoV, now sharing the `terrain` colormap and 1–99th-percentile elevation limits with panel (0,0) so valley/ridge colors stay comparable across frames; cyan points / lines are the extracted channel graph colored by connected component. **(1,0)** per-capture topology history (β₀, β₁, Fiedler). **(1,1)** adaptive-planner diagnostics (score, unseen fraction, stream fraction). **(1,2)** extracted stream mask + local graph inside the FoV, with per-component coloring and (β₀, β₁, Fiedler, component count) in the panel title.*
+*Realtime run at step 200/200 on the Phoenix/Tonto HydroSHEDS tile. **(0,0)** full DEM with live drone path. **(0,1)** coverage + exploration graph (temporal white edges, proximity cyan edges, node color = β₁). **(0,2)** DEM inside FoV using matched terrain colors/elevation context. **(1,0)** topology history (β₀, β₁, Fiedler). **(1,1)** adaptive diagnostics (score, unseen fraction, stream fraction). **(1,2)** stream mask + local graph in FoV with per-component coloring and panel-title topology stats.*
 
 Realtime drone-style exploration over DEM tiles with a square camera footprint
 derived from altitude/FOV, direct delta-Betti waypoint selection, and optional
@@ -242,29 +242,17 @@ Key capabilities:
     different components within `D` pixels; unifies rendered CC coloring
     without re-running Betti.
 
-Phoenix/Tonto example (HydroSHEDS 3 arc-second):
+Phoenix/Tonto example run command (HydroSHEDS 3 arc-second):
 
 ```bash
 python3 examples/controller/drone_dem_betti_adaptive_experiment.py \
-    --dem-tiff "datasets/hydroshed-dem/na_con_3s/na_con_3s.tif" \
-    --bbox-lonlat="-112.6,33.2,-110.6,34.3" \
-    --bbox-crop-name "phoenix_tonto_bbox.tif" \
-    --nodata-value 32767 \
-    --dem-resolution-m 90 \
-    --altitude-m 8000 \
-    --fov-deg 60 \
-    --steps 200 \
-    --w-beta1 3.0 \
-    --w-hotspot 1.8 \
-    --w-momentum 0.45 \
-    --revisit-penalty 0.8 \
-    --stagnation-patience 8 \
-    --target-overlap 0.5 \
-    --overlap-penalty 1.2 \
-    --realtime \
-    --realtime-pause-s 0.03 \
-    --realtime-block \
-    --output-dir "datasets/hydroshed-dem/drone_betti_realtime"
+  --dem-tiff datasets/hydroshed-dem/na_con_3s/na_con_3s.tif \
+  --bbox-lonlat=-112.6,33.2,-110.6,34.3 \
+  --nodata-value 32767 --dem-resolution-m 90 \
+  --altitude-m 4000 --fov-deg 60 --steps 200 \
+  --channel-extractor simple \
+  --realtime --realtime-block \
+  --output-dir datasets/hydroshed-dem/drone_betti_run
 ```
 
 RivGraph extractor mode with mask closing / endpoint bridging for more connected trees:
