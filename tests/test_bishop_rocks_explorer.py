@@ -1,14 +1,13 @@
-"""Tests for ``bishop_rocks_graph_explorer`` — the quadrant-adaptive graph
-explorer over rock-centroid point data.
+"""Tests for ``bishop_rocks_graph_explorer`` — the k-NN graph explorer over
+rock-centroid point data.
 
 Covers only the analytical primitives (no matplotlib, no CSV I/O):
 
 - ``LocalFrame``: lon/lat → local metres projection
 - ``knn_edges``: k-nearest-neighbour edge set
-- ``radius_edges``: radius-ball edge set
 - ``adjacency_from_edges`` + ``fiedler_value``: Laplacian smallest nonzero
-- ``quadrant_metrics``: per-quadrant β₀/β₁/λ₂ scoring, momentum factor,
-  unseen-rock bonus, and direction-of-best consistency with the data
+- ``MOVE_DIRS`` + ``_normalize``: directional candidate utilities for greedy
+  motion policy
 - ``spiral_path``: rectangular spiral is bbox-clamped and has the requested
   number of points
 """
@@ -55,7 +54,7 @@ class TestLocalFrame:
 
 
 # ---------------------------------------------------------------------------
-# Graph construction (k-NN and radius edges)
+# Graph construction (k-NN edges)
 # ---------------------------------------------------------------------------
 
 
@@ -77,24 +76,29 @@ class TestGraphEdges:
         edges = bishop.knn_edges(xy, k=1)
         assert len(edges) >= len(xy) // 2
 
-    def test_radius_edges_empty_when_radius_tiny(self):
-        xy = self._square_grid(spacing=1.0)
-        assert bishop.radius_edges(xy, r=0.1) == set()
+    def test_knn_edges_trait_only_excludes_nodes_without_traits(self):
+        # 4 points in a line. Node 1 has no traits, so it must have no edges.
+        xy = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]])
+        has_trait = np.array([True, False, True, True], dtype=bool)
+        edges = bishop.knn_edges_trait_only(xy, k=2, has_trait=has_trait)
+        for a, b in edges:
+            assert has_trait[a] and has_trait[b]
+        assert all(1 not in e for e in edges)
 
-    def test_radius_edges_one_catches_cardinal_neighbours(self):
-        xy = self._square_grid(n=3, spacing=1.0)   # centre at index 4
-        edges = bishop.radius_edges(xy, r=1.01)
-        # centre should connect to its 4 cardinal neighbours (indices 1, 3, 5, 7)
-        cardinal = {(1, 4), (3, 4), (4, 5), (4, 7)}
-        assert cardinal.issubset(edges)
-
-    def test_radius_edges_grow_with_radius(self):
-        xy = self._square_grid(n=4, spacing=1.0)   # 16 points
-        small = bishop.radius_edges(xy, r=1.01)
-        large = bishop.radius_edges(xy, r=2.5)
-        assert small.issubset(large)
-        assert len(large) > len(small)
-
+    def test_trait_mask_for_coords_matches_lonlat_subset(self):
+        coords = bishop.pd.DataFrame(
+            {"lon": [-1.0, 0.0, 1.0], "lat": [10.0, 11.0, 12.0]}
+        )
+        traits = bishop.pd.DataFrame(
+            {
+                "lon": [0.0, 1.0],
+                "lat": [11.0, 12.0],
+                "area_m2": [1.0, 2.0],
+                "eccentricity": [0.5, 0.7],
+            }
+        )
+        mask = bishop.trait_mask_for_coords(coords, traits)
+        assert mask.tolist() == [False, True, True]
 
 # ---------------------------------------------------------------------------
 # Laplacian Fiedler value
@@ -122,86 +126,28 @@ class TestFiedler:
 
 
 # ---------------------------------------------------------------------------
-# Quadrant metrics
+# Directional-candidate utilities (greedy motion policy)
 # ---------------------------------------------------------------------------
 
 
-class TestQuadrantMetrics:
-    def _build_quadrants(self, seed=0):
-        """Place dense cluster in NE, sparse cluster in SW (centred at origin)."""
-        rng = np.random.default_rng(seed)
-        ne = rng.normal(loc=(4.0, 4.0), scale=0.8, size=(40, 2))
-        sw = rng.normal(loc=(-4.0, -4.0), scale=0.8, size=(6, 2))
-        xy = np.vstack([ne, sw])
-        A = bishop.adjacency_from_edges(len(xy), bishop.knn_edges(xy, k=4))
-        return xy, A
+class TestDirectionalUtilities:
+    def test_legacy_radius_and_quadrant_apis_removed(self):
+        assert not hasattr(bishop, "radius_edges")
+        assert not hasattr(bishop, "quadrant_metrics")
 
-    def test_quadrant_count_and_names(self):
-        xy, A = self._build_quadrants()
-        qs = bishop.quadrant_metrics(
-            xy, A, center=(0.0, 0.0),
-            w_beta1=1.0, w_fiedler=1.0,
-        )
-        names = [q.name for q in qs]
-        assert names == ["NE", "NW", "SW", "SE"]
+    def test_move_dirs_contains_stay_and_cardinals(self):
+        names = [name for name, _vec in bishop.MOVE_DIRS]
+        assert "STAY" in names
+        for k in ("N", "S", "E", "W", "NE", "NW", "SE", "SW"):
+            assert k in names
 
-    def test_dense_ne_cluster_wins_on_beta1(self):
-        """With only β₁ weighted, the big NE cluster wins (more cycles)."""
-        xy, A = self._build_quadrants()
-        qs = bishop.quadrant_metrics(
-            xy, A, center=(0.0, 0.0),
-            w_beta1=1.0, w_fiedler=0.0,
-        )
-        ne = next(q for q in qs if q.name == "NE")
-        sw = next(q for q in qs if q.name == "SW")
-        assert ne.n_nodes > sw.n_nodes
-        assert ne.beta1 > sw.beta1
-        assert ne.score > sw.score
-
-    def test_empty_quadrant_scores_zero(self):
-        xy = np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 1.5]])   # all NE
-        A = bishop.adjacency_from_edges(3, bishop.knn_edges(xy, k=1))
-        qs = bishop.quadrant_metrics(
-            xy, A, center=(0.0, 0.0),
-            w_beta1=1.0, w_fiedler=1.0,
-        )
-        for q in qs:
-            if q.name != "NE":
-                assert q.n_nodes == 0
-                assert q.score == 0.0
-
-    def test_momentum_bonus_and_penalty(self):
-        xy, A = self._build_quadrants()
-        # No momentum.
-        q0 = {q.name: q.score for q in bishop.quadrant_metrics(
-            xy, A, center=(0.0, 0.0),
-            w_beta1=1.0, w_fiedler=1.0, w_momentum=0.0,
-        )}
-        # Prev move was toward NE → NE score should grow, SW should shrink.
-        q_ne = {q.name: q.score for q in bishop.quadrant_metrics(
-            xy, A, center=(0.0, 0.0),
-            w_beta1=1.0, w_fiedler=1.0,
-            prev_dir=(1.0 / math.sqrt(2), 1.0 / math.sqrt(2)),
-            w_momentum=0.45,
-        )}
-        assert q_ne["NE"] > q0["NE"]
-        assert q_ne["SW"] < q0["SW"] or q0["SW"] == 0.0
-
-    def test_unseen_bonus(self):
-        xy, A = self._build_quadrants()
-        # Mark *all* NE rocks as already-seen ⇒ unseen_mask zero in NE.
-        n = len(xy)
-        unseen = np.ones(n, dtype=bool)
-        ne_idx = np.where((xy[:, 0] > 0) & (xy[:, 1] > 0))[0]
-        unseen[ne_idx] = False
-        q_with = {q.name: q.score for q in bishop.quadrant_metrics(
-            xy, A, center=(0.0, 0.0),
-            w_beta1=0.0, w_fiedler=0.0,
-            w_unseen=5.0, unseen_mask=unseen,
-        )}
-        # NE has zero unseen rocks → score 0; SW has unseen rocks → positive score.
-        assert q_with["NE"] == 0.0
-        assert q_with["SW"] > 0.0
+    def test_normalize_unit_and_zero(self):
+        ux, uy = bishop._normalize(3.0, 4.0)
+        assert ux == pytest.approx(0.6)
+        assert uy == pytest.approx(0.8)
+        zx, zy = bishop._normalize(0.0, 0.0)
+        assert zx == 0.0
+        assert zy == 0.0
 
 
 # ---------------------------------------------------------------------------

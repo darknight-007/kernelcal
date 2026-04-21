@@ -310,16 +310,14 @@ Outputs are written under `--output-dir`:
 
 ### Bishop rocks graph explorer (`bishop_rocks_graph_explorer.py`)
 
-![Bishop rocks graph explorer — quadrant-adaptive run, step 80/80, FoV at (-58.1, 158.5) m, n_nodes=2505, β₀=1, β₁=6574, λ₂=0.00278, chosen quadrant NE](bishop_figures/rocks_explorer/bishop_rocks_explorer_live.png)
+![Bishop rocks graph explorer — greedy run, step 80/80, local graph/topology/trait diagnostics and cumulative exploration](bishop_figures/rocks_explorer/bishop_rocks_explorer_live.png)
 
-*Quadrant-adaptive run at step 80/80. **(0,0)** full scarp map, rocks
-coloured by area (log), crimson scan window + path, gold arrow for the
-chosen next move. **(0,1)** local FoV graph — cyan k-NN, white radius
-edges, dashed quadrant dividers, per-quadrant `n / β₀ / β₁ / λ₂ / score`
-labels with the winning quadrant in gold. **(0,2)** area histogram inside
-the window. **(1,0)** topology history — `n_nodes`, `n_components`, β₁
-(cycles), Fiedler × 10. **(1,1)** trait medians. **(1,2)** cumulative
-explored rocks (eccentricity vs area, coloured by discovery step).*
+*Greedy run at step 80/80. **(0,0)** full scarp map, rocks coloured by
+relative elevation, crimson scan window + path, gold arrow for chosen next
+move. **(0,1)** local FoV k-NN graph (cyan edges, node color = component).
+**(0,2)** area histogram in-window. **(1,0)** topology history (`n_nodes`,
+`n_components`, β₁ cycles, Fiedler × 10). **(1,1)** trait medians.
+**(1,2)** cumulative explored rocks (eccentricity vs area, coloured by step).*
 
 Point-data analogue of the drone DEM adaptive mapping above: the graph is
 built over **rock centroids** from the Bishop scarp Mask R-CNN inventory
@@ -327,31 +325,28 @@ built over **rock centroids** from the Bishop scarp Mask R-CNN inventory
 not DEM pixels. A circular FoV of radius `--window-m` slides across the
 scarp and, at each step:
 
-1. Projects all lon/lat to a local equirectangular frame in **metres** so
-   the `--radius-m` rule is geometrically correct.
-2. Builds two graphs over the trait rocks **inside the window**:
-   - `--knn K` — k-nearest-neighbour graph (default 6).
-   - `--radius-m R` — 10 m radius graph (default 10).
+1. Projects all lon/lat to a local equirectangular frame in **metres**.
+2. Uses all rocks in-window as nodes, but adds k-NN edges **only between
+   rocks that have trait rows** in `rock_traits_full.csv` (trait-missing
+   rocks remain isolated).
 3. Computes β₀ (components), β₁ = E − V + β₀ (cycles), and Fiedler λ₂ on
    the local k-NN Laplacian.
-4. Splits the FoV into **NE / NW / SW / SE quadrants** and scores each
-   induced sub-graph by a weighted combination of β₀, β₁, λ₂, and unseen
-   rocks, with a multiplicative momentum factor to prevent oscillation:
+4. Scores directional candidates (E/NE/N/NW/W/SW/S/SE/STAY) by normalized
+   topology + unseen fraction:
 
    ```
-   info  = w_beta1 * β₁  +  w_fiedler * λ₂ * n  +  w_beta0 * β₀  +  w_unseen * n_new
-   score = info * (1 + w_momentum * cos(prev_dir, quadrant_dir))
+   score = w_beta1*(β₁/n) + w_fiedler*λ₂ - w_beta0*(β₀/n) + w_unseen*unseen_frac
    ```
 
-5. Steps toward the winning quadrant (`--step-m`, default `0.6 * window-m`).
+   plus momentum, anti-backtrack/loop penalties, and optional Gaussian
+   decision noise.
+5. Steps toward the winning direction (`--step-m`, default `0.6 * window-m`).
 
 Live 2×3 panel figure (mirrors `drone_dem_betti_adaptive_experiment.py`):
 
 - **(0,0)** Full scarp map — rocks colored by area (log scale), crimson scan
   window, crimson path trail, gold arrow for the chosen next move.
-- **(0,1)** Local graph inside the FoV with cyan k-NN edges, white radius
-  edges, dashed quadrant dividers, and each quadrant labelled
-  `n / β₀ / β₁ / λ₂ / score` (chosen quadrant bolded in gold). Nodes are
+- **(0,1)** Local k-NN graph inside the FoV with cyan edges; nodes are
   coloured by connected component (`tab20`).
 - **(0,2)** Log-log area histogram of rocks in the current window.
 - **(1,0)** Rolling topology history: `n_nodes`, `n_components` (β₀),
@@ -361,46 +356,40 @@ Live 2×3 panel figure (mirrors `drone_dem_betti_adaptive_experiment.py`):
 - **(1,2)** Cumulative explored rocks — eccentricity vs area colored by
   discovery order.
 
-Quadrant-adaptive planner (default):
+Greedy directional planner (default):
 
 ```bash
-python3 bishop_rocks_graph_explorer.py \
-    --data-dir datasets/bishop_scarp \
-    --steps 80 --window-m 40 --knn 6 --radius-m 10 \
-    --w-beta1 1.0 --w-fiedler 20 --w-unseen 5 --w-momentum 0.45 \
-    --save-mp4 bishop_figures/rocks_explorer/bishop_rocks_explorer_adaptive.mp4
+python3 examples/bishop/bishop_rocks_graph_explorer.py \
+    --data-dir /path/to/bishop-root \
+    --steps 80 --window-m 40 --knn 6 \
+    --motion-policy greedy \
+    --w-beta1 1.0 --w-beta0 0.5 --w-fiedler 20 --w-unseen 5 --w-momentum 0.45 \
+    --decision-noise-sigma 0.05 --decision-noise-seed 42 \
+    --show
 ```
 
 Fixed outward-spiral planner (reference, no β-adaptivity):
 
 ```bash
-python3 bishop_rocks_graph_explorer.py --planner spiral --steps 120
+python3 examples/bishop/bishop_rocks_graph_explorer.py --motion-policy spiral --steps 120
 ```
 
 Live interactive window:
 
 ```bash
-python3 bishop_rocks_graph_explorer.py --show
+python3 examples/bishop/bishop_rocks_graph_explorer.py --show
 ```
 
 Outputs (to `--out`, default `bishop_figures/rocks_explorer/`):
 
 - `bishop_rocks_explorer_final.png` — last frame of the exploration
 - `bishop_rocks_explorer_summary.csv` — per-step
-  `cx, cy, n_nodes, n_edges_knn, n_edges_rad,
+  `cx, cy, n_nodes, n_edges_knn,
    beta0_components, beta1_cycles, fiedler,
    median_area_m2, median_eccentricity,
-   chosen_quadrant, chosen_score`
+   chosen_direction, chosen_score`
 - `bishop_rocks_explorer_adaptive.mp4` / `.gif` when `--save-mp4` /
   `--save-gif` is used.
-
-Coverage comparison on the Bishop scarp (≈ 14k trait rocks,
-window `r = 40 m`, `k = 6`, radius `10 m`):
-
-| planner    | steps | trait rocks visited  | coverage |
-|------------|-------|----------------------|----------|
-| `spiral`   | 120   | 9,120 / 13,701       | 67 %     |
-| `quadrant` | 60    | 13,701 / 13,701      | **100 %** |
 
 Companion script `plot_bishop_rocks.py` generates the two static summaries
 used upstream of the explorer:

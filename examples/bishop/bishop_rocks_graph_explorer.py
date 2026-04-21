@@ -10,21 +10,21 @@ Inputs (expected under ``unprocessed/bishop-root/`` next to this script):
   - ``rock_traits_full.csv`` — lon, lat, area_m2, major_axis_m,
     minor_axis_m, eccentricity, orientation_deg, elevation_rel   ~14k rocks
 
-The explorer sweeps a circular window of radius ``--window-m`` along a spiral
-path covering the traits bounding box. At every step it:
+The explorer sweeps a circular window of radius ``--window-m`` over the traits
+bounding box. At every step it:
 
-1. Projects all lon/lat to a local equirectangular frame in **metres** so that
-   the ``--radius-m`` (default 10 m) neighbour rule is geometrically correct.
+1. Projects all lon/lat to a local equirectangular frame in **metres**.
 2. Collects the trait rocks inside the window.
-3. Builds two graphs over those local rocks:
-     * ``k-NN``  — each rock connected to its ``--knn`` nearest neighbours.
-     * ``radius`` — each rock connected to all rocks within ``--radius-m`` m.
+3. Builds a local **k-NN graph** where edges are added only between rocks that
+   have trait rows in ``rock_traits_full.csv``. Rocks without traits remain
+   isolated (no incident edges).
 4. Runs scipy's connected-components and the smallest Laplacian eigenvalue
    (Fiedler) on the k-NN graph.
-5. Updates a live 2x3 matplotlib figure:
+5. Scores candidate motion directions from local k-NN topology + exploration
+   bonus (unseen rocks) and moves toward the best candidate.
+6. Updates a live 2x3 matplotlib figure:
      (0,0) full map, rocks colored by area + window + path
-     (0,1) local graph — nodes colored by component, cyan = k-NN edges,
-           white = radius-only edges
+     (0,1) local graph — nodes colored by component, cyan = k-NN edges
      (0,2) area histogram over rocks inside the window
      (1,0) rolling topology history (n_nodes, n_components, Fiedler)
      (1,1) rolling trait stats (median area, median eccentricity)
@@ -36,13 +36,14 @@ Usage
 -----
     python3 bishop_rocks_graph_explorer.py                 # default scan
     python3 bishop_rocks_graph_explorer.py --show          # interactive window
-    python3 bishop_rocks_graph_explorer.py --steps 120 --knn 8 --radius-m 10
+    python3 bishop_rocks_graph_explorer.py --steps 120 --knn 8
     python3 bishop_rocks_graph_explorer.py --save-mp4 run.mp4
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,13 +54,18 @@ import numpy as np
 import pandas as pd
 from matplotlib import animation as mpl_animation
 from matplotlib.collections import LineCollection
-from matplotlib.colors import LogNorm
+from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
 from matplotlib.patches import Circle
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import connected_components, laplacian
 from scipy.sparse.linalg import eigsh
 from scipy.spatial import cKDTree
+
+# Ensure direct script execution can import the local ``kernelcal`` package.
+# This mirrors sibling example scripts moved under ``examples/<category>/``.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO_ROOT))
 
 # Shared lon/lat -> local metres projection lives in the kernelcal package
 # so this script, the drone-DEM explorer, and any future examples share the
@@ -70,9 +76,21 @@ from kernelcal.geo3d import METERS_PER_DEG_LAT, LocalFrame  # noqa: F401
 
 HERE = Path(__file__).resolve().parent
 # Matches sibling scripts (``bishop_kernelcal.py``, ``bishop_trait_analysis.py``):
-# rock centroids + per-rock traits CSVs live under ``datasets/bishop_scarp/``.
-DEFAULT_DATA_DIR = HERE / "datasets" / "bishop_scarp"
-DEFAULT_OUT_DIR = HERE / "bishop_figures" / "rocks_explorer"
+# rock centroids + per-rock traits CSVs are expected under
+# ``<repo>/datasets/bishop_scarp/`` by default.  Env vars allow local override
+# without editing the script.
+DEFAULT_DATA_DIR = Path(
+    os.environ.get(
+        "KERNELCAL_BISHOP_DATA_DIR",
+        str(REPO_ROOT / "datasets" / "bishop_scarp"),
+    )
+)
+DEFAULT_OUT_DIR = Path(
+    os.environ.get(
+        "KERNELCAL_BISHOP_FIG_DIR",
+        str(REPO_ROOT / "bishop_figures" / "rocks_explorer"),
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -124,12 +142,69 @@ def knn_edges(xy: np.ndarray, k: int) -> set[tuple[int, int]]:
     return _edge_set_from_neighbors([row for row in idx])
 
 
-def radius_edges(xy: np.ndarray, r: float) -> set[tuple[int, int]]:
-    if len(xy) < 2:
+def trait_mask_for_coords(
+    coords: pd.DataFrame,
+    traits: pd.DataFrame,
+    *,
+    decimals: int = 8,
+    tol_m: float = 1.0,
+) -> np.ndarray:
+    """Boolean mask over `coords`: True when that rock has trait data.
+
+    Prefers nearest-neighbour matching in projected metres (`x_m`,`y_m`) with
+    tolerance `tol_m`, which is robust to CSV precision drift between the two
+    source files. Falls back to rounded lon/lat key matching when projected
+    columns are unavailable.
+    """
+    if len(coords) == 0:
+        return np.empty((0,), dtype=bool)
+    if len(traits) == 0:
+        return np.zeros((len(coords),), dtype=bool)
+
+    if {"x_m", "y_m"}.issubset(coords.columns) and {"x_m", "y_m"}.issubset(traits.columns):
+        cxy = np.c_[coords["x_m"].to_numpy(dtype=float), coords["y_m"].to_numpy(dtype=float)]
+        txy = np.c_[traits["x_m"].to_numpy(dtype=float), traits["y_m"].to_numpy(dtype=float)]
+        tree = cKDTree(cxy)
+        d, idx = tree.query(txy, k=1)
+        mask = np.zeros((len(coords),), dtype=bool)
+        good = np.isfinite(d) & (d <= float(tol_m))
+        if np.any(good):
+            mask[np.asarray(idx[good], dtype=int)] = True
+        return mask
+
+    tr_lon = np.round(traits["lon"].to_numpy(dtype=float), decimals=decimals)
+    tr_lat = np.round(traits["lat"].to_numpy(dtype=float), decimals=decimals)
+    trait_keys = {(float(lo), float(la)) for lo, la in zip(tr_lon.tolist(), tr_lat.tolist())}
+
+    co_lon = np.round(coords["lon"].to_numpy(dtype=float), decimals=decimals)
+    co_lat = np.round(coords["lat"].to_numpy(dtype=float), decimals=decimals)
+    mask = np.array(
+        [(float(lo), float(la)) in trait_keys for lo, la in zip(co_lon.tolist(), co_lat.tolist())],
+        dtype=bool,
+    )
+    return mask
+
+
+def knn_edges_trait_only(xy: np.ndarray, k: int, has_trait: np.ndarray) -> set[tuple[int, int]]:
+    """k-NN edges between nodes with traits only; others stay isolated."""
+    n = int(len(xy))
+    if n < 2:
         return set()
-    tree = cKDTree(xy)
-    neighbors = tree.query_ball_point(xy, r=r)
-    return _edge_set_from_neighbors([np.asarray(n, dtype=int) for n in neighbors])
+    m = np.asarray(has_trait, dtype=bool)
+    if m.size != n:
+        raise ValueError("has_trait mask length must match xy length")
+    active = np.where(m)[0]
+    if active.size < 2:
+        return set()
+
+    sub_edges = knn_edges(xy[active], k)
+    out: set[tuple[int, int]] = set()
+    for i_sub, j_sub in sub_edges:
+        i = int(active[int(i_sub)])
+        j = int(active[int(j_sub)])
+        a, b = (i, j) if i < j else (j, i)
+        out.add((a, b))
+    return out
 
 
 def adjacency_from_edges(n: int, edges: Iterable[tuple[int, int]]) -> csr_matrix:
@@ -161,98 +236,32 @@ def fiedler_value(A: csr_matrix) -> float:
     return float(vals[1]) if len(vals) > 1 else float(vals[0])
 
 
-# ---------------------------------------------------------------------------
-# Per-quadrant Betti + Fiedler scoring  (NE / NW / SW / SE)
-# ---------------------------------------------------------------------------
-
-
-QUADRANTS: tuple[tuple[str, tuple[float, float]], ...] = (
-    ("NE", ( 1.0,  1.0)),
-    ("NW", (-1.0,  1.0)),
-    ("SW", (-1.0, -1.0)),
-    ("SE", ( 1.0, -1.0)),
-)
-
-
-@dataclass
-class QuadrantScore:
-    name: str
-    direction: tuple[float, float]      # unit vector
-    n_nodes: int
-    beta0: int                          # components  (β₀)
-    beta1: int                          # cycles  = E - V + β₀
-    fiedler: float                      # λ₂ of induced k-NN Laplacian
-    score: float
-
-
-def quadrant_metrics(
-    local_xy: np.ndarray,
-    knn_A: csr_matrix,
-    center: tuple[float, float],
-    w_beta1: float,
-    w_fiedler: float,
-    w_beta0: float = 0.0,
-    w_unseen: float = 0.0,
-    unseen_mask: np.ndarray | None = None,
-    prev_dir: tuple[float, float] | None = None,
-    w_momentum: float = 0.0,
-) -> list[QuadrantScore]:
-    """Split the FoV rocks into NE/NW/SW/SE and score each quadrant's subgraph.
-
-    Score per quadrant::
-
-        info  = w_beta1 * β₁ + w_fiedler * λ₂ * n + w_beta0 * β₀ + w_unseen * n_new
-        score = info * (1 + w_momentum * cos(prev_dir, quad_dir))
-
-    The multiplicative momentum factor is in ``[1 - w_momentum, 1 + w_momentum]``
-    so re-visiting the previous direction's opposite quadrant is strongly
-    discounted (prevents step-by-step oscillation).
-    """
-    dx = local_xy[:, 0] - center[0]
-    dy = local_xy[:, 1] - center[1]
-    inv_sqrt2 = 1.0 / np.sqrt(2.0)
-    out: list[QuadrantScore] = []
-
-    for name, (sx, sy) in QUADRANTS:
-        mask = (np.sign(dx) == sx) & (np.sign(dy) == sy)
-        n = int(mask.sum())
-        unit = (sx * inv_sqrt2, sy * inv_sqrt2)
-        if n == 0:
-            out.append(QuadrantScore(name, unit, 0, 0, 0, 0.0, 0.0))
-            continue
-
-        sub_idx = np.where(mask)[0]
-        A_sub = knn_A[sub_idx][:, sub_idx]
-        if A_sub.nnz == 0:
-            beta0 = n
-            beta1 = 0
-            fied = 0.0
-        else:
-            beta0, _ = connected_components(A_sub, directed=False)
-            n_edges = int(A_sub.nnz // 2)          # symmetric CSR
-            beta1 = max(0, n_edges - n + int(beta0))
-            fied = fiedler_value(A_sub) if n >= 3 else 0.0
-
-        n_new = 0
-        if unseen_mask is not None and n > 0:
-            n_new = int(np.count_nonzero(unseen_mask[sub_idx]))
-
-        info = (
-            w_beta1   * float(beta1)
-            + w_fiedler * float(fied) * max(n, 1)   # λ₂ scaled by size
-            + w_beta0   * float(beta0)
-            + w_unseen  * float(n_new)              # raw new-rock count
-        )
-        if prev_dir is not None and w_momentum != 0.0:
-            cos = float(unit[0] * prev_dir[0] + unit[1] * prev_dir[1])
-            # Bound momentum factor to [1 - w_momentum, 1 + w_momentum] but never
-            # allow the score to flip sign (keeps strong β₁ positive).
-            factor = max(1.0 - abs(w_momentum), 1.0 + w_momentum * cos)
-            info *= factor
-
-        out.append(QuadrantScore(name, unit, n, int(beta0), int(beta1), float(fied),
-                                 float(info)))
-    return out
+def fiedler_value_and_ipr(A: csr_matrix) -> tuple[float, float]:
+    """Return (lambda2, IPR of Fiedler mode) for an undirected graph."""
+    n = A.shape[0]
+    if n < 3 or A.nnz == 0:
+        return 0.0, 0.0
+    L = laplacian(A, normed=False).astype(float)
+    k = min(3, n - 1)
+    try:
+        vals, vecs = eigsh(L, k=k, which="SM", return_eigenvectors=True)
+    except Exception:
+        # Fall back to value-only path if eigenvectors are numerically unstable.
+        return fiedler_value(A), 0.0
+    vals = np.real(vals)
+    vecs = np.real(vecs)
+    order = np.argsort(vals)
+    vals = vals[order]
+    vecs = vecs[:, order]
+    lam2 = float(vals[1]) if len(vals) > 1 else float(vals[0])
+    if vecs.shape[1] <= 1:
+        return lam2, 0.0
+    v2 = vecs[:, 1]
+    denom = float(np.sum(v2 * v2))
+    if denom <= 1e-12:
+        return lam2, 0.0
+    ipr = float(np.sum(v2**4) / (denom * denom))
+    return lam2, ipr
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +296,36 @@ def spiral_path(xmin: float, xmax: float, ymin: float, ymax: float,
 
 
 # ---------------------------------------------------------------------------
+# Directional candidate planner (non-quadrant)
+# ---------------------------------------------------------------------------
+
+
+MOVE_DIRS: tuple[tuple[str, tuple[float, float]], ...] = (
+    ("E",  ( 1.0,  0.0)),
+    ("NE", ( 1.0,  1.0)),
+    ("N",  ( 0.0,  1.0)),
+    ("NW", (-1.0,  1.0)),
+    ("W",  (-1.0,  0.0)),
+    ("SW", (-1.0, -1.0)),
+    ("S",  ( 0.0, -1.0)),
+    ("SE", ( 1.0, -1.0)),
+    ("STAY", (0.0, 0.0)),
+)
+
+# Anti "race-around" defaults (kept internal to keep CLI simple).
+_BACKTRACK_PENALTY = 0.75
+_BACKTRACK_COS_THRESHOLD = -0.8
+_LOOP_RETURN_PENALTY = 1.0
+_LOOP_RETURN_RADIUS_FRACTION = 0.4  # of step_m
+
+
+def _normalize(vx: float, vy: float) -> tuple[float, float]:
+    n = float(np.hypot(vx, vy))
+    if n <= 1e-9:
+        return 0.0, 0.0
+    return vx / n, vy / n
+
+# ---------------------------------------------------------------------------
 # Explorer
 # ---------------------------------------------------------------------------
 
@@ -298,13 +337,12 @@ class StepRecord:
     cy: float
     n_nodes: int
     n_edges_knn: int
-    n_edges_rad: int
     n_components: int     # β₀
     beta1: int            # cycles in local k-NN graph
     fiedler: float        # λ₂
     median_area: float
     median_ecc: float
-    chosen_quadrant: str
+    chosen_direction: str
     chosen_score: float
 
 
@@ -317,6 +355,7 @@ def run(args: argparse.Namespace) -> None:
     ty = traits["y_m"].to_numpy()
     area = traits["area_m2"].to_numpy()
     ecc = traits["eccentricity"].to_numpy()
+    elev = traits["elevation_rel"].to_numpy() if "elevation_rel" in traits.columns else None
     cx_bg = coords["x_m"].to_numpy()
     cy_bg = coords["y_m"].to_numpy()
 
@@ -327,15 +366,25 @@ def run(args: argparse.Namespace) -> None:
           f"(Δx={xmax-xmin:.0f}m, Δy={ymax-ymin:.0f}m)")
 
     step_m = args.step_m if args.step_m > 0 else 0.6 * args.window_m
-    if args.planner == "spiral":
+    rng = np.random.default_rng(args.decision_noise_seed)
+    loop_return_radius_m = _LOOP_RETURN_RADIUS_FRACTION * float(step_m)
+    if args.motion_policy == "spiral":
         spiral_pts = spiral_path(xmin, xmax, ymin, ymax, step=step_m, n_steps=args.steps)
     else:
         spiral_pts = None
 
     trait_tree = cKDTree(np.c_[tx, ty])
+    # All coord rocks are candidate nodes; only nodes with trait rows can
+    # receive k-NN edges.
+    coord_tree = cKDTree(np.c_[cx_bg, cy_bg])
+    coord_has_trait = trait_mask_for_coords(coords, traits)
+    print(
+        f"trait-linked coord rocks: {int(np.count_nonzero(coord_has_trait)):,} / {len(coords):,} "
+        "(only these are edge-eligible)"
+    )
 
-    # Path is built online (the adaptive planner chooses next center from the
-    # scored quadrants of the current FoV).
+    # Path is built online (the adaptive planner chooses next center from
+    # candidate move directions scored on local k-NN topology).
     path_xy: list[tuple[float, float]] = []
     seed_xy = (
         float(spiral_pts[0, 0]) if spiral_pts is not None else
@@ -355,15 +404,37 @@ def run(args: argparse.Namespace) -> None:
 
     # (0,0) Full map
     ax00.scatter(cx_bg, cy_bg, s=0.8, color="lightgray", alpha=0.35, linewidths=0)
-    area_clip = np.clip(area, max(area.min(), 0.05), area.max())
+    if elev is not None:
+        elev_arr = np.asarray(elev, dtype=float)
+        finite_elev = elev_arr[np.isfinite(elev_arr)]
+        if finite_elev.size:
+            vmin = float(np.nanpercentile(finite_elev, 2.0))
+            vmax = float(np.nanpercentile(finite_elev, 98.0))
+            if vmax <= vmin:
+                vmin = float(np.nanmin(finite_elev))
+                vmax = float(np.nanmax(finite_elev) + 1e-6)
+        else:
+            vmin, vmax = 0.0, 1.0
+        color_values = elev_arr
+        color_norm = Normalize(vmin=vmin, vmax=vmax)
+        color_label = "relative elevation"
+        title_suffix = "elevation"
+    else:
+        # Backward-compatible fallback for older trait exports.
+        area_clip = np.clip(area, max(area.min(), 0.05), area.max())
+        color_values = area_clip
+        color_norm = Normalize(vmin=float(np.nanmin(area_clip)),
+                               vmax=float(np.nanmax(area_clip)))
+        color_label = "area (m²)"
+        title_suffix = "area"
     sc_all = ax00.scatter(
         tx, ty,
-        c=area_clip, cmap="viridis",
-        norm=LogNorm(vmin=max(area.min(), 0.05), vmax=area.max()),
+        c=color_values, cmap="viridis",
+        norm=color_norm,
         s=np.clip(area * 1.2, 1.5, 40),
         linewidths=0, alpha=0.85,
     )
-    fig.colorbar(sc_all, ax=ax00, shrink=0.8, pad=0.02, label="area (m², log)")
+    fig.colorbar(sc_all, ax=ax00, shrink=0.8, pad=0.02, label=color_label)
     window = Circle(seed_xy, args.window_m,
                     ec="crimson", fc="none", lw=1.6, alpha=0.9)
     ax00.add_patch(window)
@@ -374,7 +445,7 @@ def run(args: argparse.Namespace) -> None:
     ax00.set_aspect("equal")
     ax00.set_xlabel("x (m, local)")
     ax00.set_ylabel("y (m, local)")
-    ax00.set_title("Bishop scarp — rocks colored by area\n"
+    ax00.set_title(f"Bishop scarp — rocks colored by {title_suffix}\n"
                    "(red: scan window, gold: next move)")
     ax00.grid(alpha=0.3)
 
@@ -382,32 +453,17 @@ def run(args: argparse.Namespace) -> None:
     ax01.set_aspect("equal")
     ax01.set_xlabel("x (m, local)")
     ax01.set_ylabel("y (m, local)")
-    ax01.set_title(f"Local graph inside window (r={args.window_m} m)")
+    ax01.set_title(f"Local k-NN graph — all rocks (r={args.window_m} m)")
     ax01.grid(alpha=0.3)
-    lc_rad = LineCollection([], colors="white", linewidths=0.8, alpha=0.55)
     lc_knn = LineCollection([], colors="cyan", linewidths=1.0, alpha=0.9)
-    ax01.add_collection(lc_rad)
     ax01.add_collection(lc_knn)
     local_nodes = ax01.scatter([], [], s=[], c=[], cmap="tab20", linewidths=0)
-    # Quadrant dividers (the two diagonals through window center).
-    quad_divider1, = ax01.plot([], [], "w--", lw=0.7, alpha=0.6)
-    quad_divider2, = ax01.plot([], [], "w--", lw=0.7, alpha=0.6)
-    # Per-quadrant text labels (updated every frame).
-    quad_labels: dict[str, plt.Text] = {
-        name: ax01.text(0, 0, "", color="white", fontsize=8, ha="center",
-                        va="center", alpha=0.9,
-                        bbox=dict(facecolor="#000000", alpha=0.35,
-                                  edgecolor="none", pad=1.2))
-        for name, _ in QUADRANTS
-    }
     ax01.legend(
         handles=[
             Line2D([0], [0], color="cyan", lw=1.2,
                    label=f"k-NN edge  (k={args.knn})"),
-            Line2D([0], [0], color="white", lw=1.0,
-                   label=f"radius edge  (r={args.radius_m:.0f} m)"),
             Line2D([0], [0], marker="o", color="k", lw=0, markersize=6,
-                   label="node (color = component)"),
+                   label="node = any rock (color = component)"),
         ],
         loc="lower left", fontsize=8, framealpha=0.85,
     )
@@ -451,10 +507,12 @@ def run(args: argparse.Namespace) -> None:
     cbar_cum = fig.colorbar(cum_scat, ax=ax12, shrink=0.8, pad=0.02, label="step")
 
     # ------------------------------------------------------------------
-    # Step loop  (online: plan next center from current-FoV quadrants)
+    # Step loop  (online: plan next center from directional candidates)
     # ------------------------------------------------------------------
     records: list[StepRecord] = []
-    seen_nodes: set[int] = set()
+    seen_nodes: set[int] = set()         # coord indices — all rocks seen so far
+    seen_trait_nodes: set[int] = set()   # trait indices — for cumulative scatter
+    metric_history: list[np.ndarray] = []   # spectral/topological vectors for novelty
     next_center: list[tuple[float, float]] = [seed_xy]  # mutable across frames
 
     # Update ax10 (topology history) to include β₁.
@@ -469,100 +527,170 @@ def run(args: argparse.Namespace) -> None:
             cx, cy = next_center[0]
         path_xy_snapshot = path_xy + [(cx, cy)]
 
-        idx = trait_tree.query_ball_point((cx, cy), r=args.window_m)
-        idx = np.asarray(idx, dtype=int)
+        # Graph built over ALL coord rocks inside the window.
+        coord_idx = np.asarray(coord_tree.query_ball_point((cx, cy), r=args.window_m), dtype=int)
+        n_local = len(coord_idx)
+        local_xy = np.c_[cx_bg[coord_idx], cy_bg[coord_idx]] if n_local else np.empty((0, 2))
 
-        local_xy = np.c_[tx[idx], ty[idx]] if len(idx) else np.empty((0, 2))
-        n_local = len(idx)
+        # Trait rocks inside the window — for stats / histogram only.
+        trait_idx = np.asarray(trait_tree.query_ball_point((cx, cy), r=args.window_m), dtype=int)
+        n_traits_local = len(trait_idx)
 
+        local_has_trait = coord_has_trait[coord_idx] if n_local else np.empty((0,), dtype=bool)
         if n_local >= 2:
-            e_knn = knn_edges(local_xy, args.knn)
-            e_rad = radius_edges(local_xy, args.radius_m)
+            e_knn = knn_edges_trait_only(local_xy, args.knn, local_has_trait)
         else:
-            e_knn = set(); e_rad = set()
+            e_knn = set()
 
-        rad_only = e_rad - e_knn
         A_knn = adjacency_from_edges(max(n_local, 1), e_knn)
-        n_comp, labels = (1, np.zeros(max(n_local, 1), dtype=int))
-        if n_local > 0 and A_knn.nnz > 0:
+        if n_local > 0:
+            # Always run connected-components, even for empty-edge graphs.
+            # (If there are N isolated nodes, beta0 must be N, not 1.)
             n_comp, labels = connected_components(A_knn, directed=False)
+        else:
+            n_comp, labels = (0, np.empty((0,), dtype=int))
         fied_full = fiedler_value(A_knn) if n_local >= 3 else 0.0
         n_edges_full = int(A_knn.nnz // 2)
         beta1_full = max(0, n_edges_full - n_local + int(n_comp))
 
-        # ---- per-quadrant scoring -----------------------------------------
-        unseen_mask = None
-        if args.w_unseen > 0.0 and n_local:
-            unseen_mask = np.fromiter(
-                (int(i) not in seen_nodes for i in idx), dtype=bool, count=n_local,
-            )
-
-        prev_dir_vec: tuple[float, float] | None = None
+        # ---- non-quadrant move selection from directional candidates -------
+        prev_dir_vec = (0.0, 0.0)
         if len(records) >= 1:
             prev_rec = records[-1]
             vx = cx - prev_rec.cx
             vy = cy - prev_rec.cy
-            norm = float(np.hypot(vx, vy))
-            if norm > 1e-6:
-                prev_dir_vec = (vx / norm, vy / norm)
+            prev_dir_vec = _normalize(vx, vy)
 
-        if n_local >= 4:
-            quads = quadrant_metrics(
-                local_xy, A_knn, (cx, cy),
-                w_beta1=args.w_beta1, w_fiedler=args.w_fiedler,
-                w_beta0=args.w_beta0, w_unseen=args.w_unseen,
-                unseen_mask=unseen_mask,
-                prev_dir=prev_dir_vec, w_momentum=args.w_momentum,
-            )
-        else:
-            quads = [QuadrantScore(name, (sx/np.sqrt(2), sy/np.sqrt(2)),
-                                   0, 0, 0, 0.0, 0.0)
-                     for name, (sx, sy) in QUADRANTS]
+        best_name = "STAY"
+        best_score = -np.inf
+        best_dir = (0.0, 0.0)
+        seen_arr = np.fromiter(seen_nodes, dtype=int) if seen_nodes else np.empty((0,), dtype=int)
+        best_metric_vec = np.zeros(4, dtype=float)
+        scored_candidates: list[tuple[float, str, tuple[float, float], np.ndarray]] = []
+        for name, (dx, dy) in MOVE_DIRS:
+            cand_x = float(np.clip(cx + step_m * dx, xmin, xmax))
+            cand_y = float(np.clip(cy + step_m * dy, ymin, ymax))
+            cand_idx = np.asarray(coord_tree.query_ball_point((cand_x, cand_y), r=args.window_m), dtype=int)
+            n_cand = int(len(cand_idx))
+            if n_cand == 0:
+                continue
+            else:
+                cand_xy = np.c_[cx_bg[cand_idx], cy_bg[cand_idx]]
+                cand_has_trait = coord_has_trait[cand_idx] if n_cand else np.empty((0,), dtype=bool)
+                cand_edges = (
+                    knn_edges_trait_only(cand_xy, args.knn, cand_has_trait)
+                    if n_cand >= 2 else set()
+                )
+                cand_A = adjacency_from_edges(max(n_cand, 1), cand_edges)
+                if n_cand > 0 and cand_A.nnz > 0:
+                    cand_beta0, _ = connected_components(cand_A, directed=False)
+                else:
+                    cand_beta0 = n_cand
+                cand_fied, cand_ipr = fiedler_value_and_ipr(cand_A) if n_cand >= 3 else (0.0, 0.0)
+                cand_beta1 = max(0, int(cand_A.nnz // 2) - n_cand + int(cand_beta0))
+                n_new = int(np.count_nonzero(~np.isin(cand_idx, seen_arr))) if seen_arr.size else n_cand
+                if args.motion_policy == "spectral-leaf":
+                    beta0_norm = float(cand_beta0) / max(1.0, float(n_cand))
+                    beta1_norm = float(cand_beta1) / max(1.0, float(n_cand))
+                    leafness = 1.0 - float(np.clip(beta1_norm, 0.0, 1.0))
+                    lambda_inv = min(50.0, 1.0 / (1e-6 + max(0.0, float(cand_fied))))
+                    unseen_frac = float(n_new) / max(1.0, float(n_cand))
+                    metric_vec = np.array([beta0_norm, beta1_norm, float(cand_fied), float(cand_ipr)], dtype=float)
+                    novelty = 0.0
+                    if metric_history:
+                        hist = np.vstack(metric_history)
+                        novelty = float(np.min(np.linalg.norm(hist - metric_vec[None, :], axis=1)))
+                    score = (
+                        args.w_lambda_inv * lambda_inv
+                        + args.w_beta1_tree * leafness
+                        + args.w_beta0_spectral * beta0_norm
+                        + args.w_ipr * float(cand_ipr)
+                        + args.w_novelty * novelty
+                        + args.w_unseen * unseen_frac
+                    )
+                else:
+                    beta0_norm = float(cand_beta0) / max(1.0, float(n_cand))
+                    beta1_norm = float(cand_beta1) / max(1.0, float(n_cand))
+                    unseen_frac = float(n_new) / max(1.0, float(n_cand))
+                    metric_vec = np.array([float(cand_beta0), float(cand_beta1),
+                                           float(cand_fied), float(n_new)], dtype=float)
+                    score = (
+                        args.w_beta1 * beta1_norm
+                        + args.w_fiedler * float(cand_fied)
+                        - args.w_beta0 * beta0_norm
+                        + args.w_unseen * unseen_frac
+                    )
+                if name == "STAY":
+                    score -= 0.5 * max(1.0, args.w_unseen)
+                mv = _normalize(dx, dy)
+                if mv != (0.0, 0.0):
+                    score += args.w_momentum * (mv[0] * prev_dir_vec[0] + mv[1] * prev_dir_vec[1])
 
-        # Pick best (random tie-break to avoid deterministic stalls).
-        best_score = max(q.score for q in quads)
-        candidates = [q for q in quads if q.score == best_score]
-        best = candidates[0] if len(candidates) == 1 else \
-               candidates[step % len(candidates)]
+                # Anti "race-around" guards:
+                # 1) penalize immediate backtracking (direction reversal),
+                # 2) penalize tight two-step loops (A->B->A-style returns).
+                if len(records) >= 1 and mv != (0.0, 0.0):
+                    prev_mv = _normalize(cx - records[-1].cx, cy - records[-1].cy)
+                    if prev_mv != (0.0, 0.0):
+                        cosang = mv[0] * prev_mv[0] + mv[1] * prev_mv[1]
+                        if cosang <= _BACKTRACK_COS_THRESHOLD:
+                            score -= _BACKTRACK_PENALTY
+                if len(records) >= 2:
+                    dist_2back = float(np.hypot(cand_x - records[-2].cx, cand_y - records[-2].cy))
+                    if dist_2back <= loop_return_radius_m:
+                        score -= _LOOP_RETURN_PENALTY
 
-        # --- figure out next center (for step + 1) -------------------------
-        # Direction bias: if all scores are ~0 (empty FoV), bail toward bbox
-        # centre so the explorer doesn't sit on an empty spot forever.
-        if best_score <= 0.0:
+                # Optional stochastic exploration: small Gaussian perturbation
+                # to break deterministic lock-in under near-tied scores.
+                if float(args.decision_noise_sigma) > 0.0:
+                    score += float(rng.normal(0.0, float(args.decision_noise_sigma)))
+                scored_candidates.append((float(score), name, (dx, dy), metric_vec))
+
+        if scored_candidates:
+            best_score = max(s for s, *_ in scored_candidates)
+            eps = 1e-6 * max(1.0, abs(best_score))
+            tied = [cand for cand in scored_candidates if abs(cand[0] - best_score) <= eps]
+            chosen = tied[len(records) % len(tied)]
+            _, best_name, best_dir, best_metric_vec = chosen
+
+        # if all candidates are poor (empty neighborhoods), drift toward bbox center
+        if not np.isfinite(best_score):
             tgt = np.array([0.5 * (xmin + xmax), 0.5 * (ymin + ymax)])
             vec = tgt - np.array([cx, cy])
             nrm = float(np.linalg.norm(vec))
             dirv = (vec / nrm) if nrm > 1e-6 else np.array([1.0, 0.0])
         else:
-            dirv = np.array(best.direction)
-
+            dirv = np.array(_normalize(best_dir[0], best_dir[1]))
         new_cx = float(np.clip(cx + step_m * dirv[0], xmin, xmax))
         new_cy = float(np.clip(cy + step_m * dirv[1], ymin, ymax))
         next_center[0] = (new_cx, new_cy)
 
-        med_area = float(np.median(area[idx])) if n_local else float("nan")
-        med_ecc = float(np.median(ecc[idx])) if n_local else float("nan")
+        med_area = float(np.median(area[trait_idx])) if n_traits_local else float("nan")
+        med_ecc = float(np.median(ecc[trait_idx])) if n_traits_local else float("nan")
 
         rec = StepRecord(
             step=step, cx=cx, cy=cy,
             n_nodes=n_local,
             n_edges_knn=len(e_knn),
-            n_edges_rad=len(e_rad),
             n_components=int(n_comp),
             beta1=int(beta1_full),
             fiedler=float(fied_full),
             median_area=med_area,
             median_ecc=med_ecc,
-            chosen_quadrant=best.name,
-            chosen_score=float(best.score),
+            chosen_direction=best_name,
+            chosen_score=float(best_score if np.isfinite(best_score) else 0.0),
         )
         if records and records[-1].step == step:
             records[-1] = rec          # FuncAnimation can call frame 0 twice
         else:
             records.append(rec)
+            # Track chosen-state spectral/topological fingerprint for novelty.
+            if np.isfinite(best_score):
+                metric_history.append(best_metric_vec.copy())
             if spiral_pts is None and len(path_xy) < step + 1:
                 path_xy.append((cx, cy))
-        seen_nodes.update(int(i) for i in idx)
+        seen_nodes.update(int(i) for i in coord_idx)
+        seen_trait_nodes.update(int(i) for i in trait_idx)
 
         # ------------------------- update artists --------------------------
         window.center = (cx, cy)
@@ -582,44 +710,21 @@ def run(args: argparse.Namespace) -> None:
 
         # Local graph panel.
         knn_segs = [np.array([local_xy[a], local_xy[b]]) for a, b in e_knn]
-        rad_segs = [np.array([local_xy[a], local_xy[b]]) for a, b in rad_only]
         lc_knn.set_segments(knn_segs)
-        lc_rad.set_segments(rad_segs)
 
-        node_sizes = np.clip(area[idx] * 2.5, 5, 80) if n_local else np.array([])
+        node_sizes = np.full(n_local, 8.0) if n_local else np.array([])
         local_nodes.set_offsets(local_xy if n_local else np.empty((0, 2)))
         local_nodes.set_sizes(node_sizes)
-        local_nodes.set_array(labels if n_local else np.array([]))
+        local_nodes.set_array(labels.astype(float) if n_local else np.array([]))
 
         pad = 0.15 * args.window_m
         lim = args.window_m + pad
         ax01.set_xlim(cx - lim, cx + lim)
         ax01.set_ylim(cy - lim, cy + lim)
 
-        # Quadrant dividers (two diagonals through window center).
-        d = args.window_m
-        quad_divider1.set_data([cx - d, cx + d], [cy - d, cy + d])
-        quad_divider2.set_data([cx - d, cx + d], [cy + d, cy - d])
-
-        # Per-quadrant annotations.
-        off = 0.55 * args.window_m
-        for q in quads:
-            lx = cx + q.direction[0] * off
-            ly = cy + q.direction[1] * off
-            is_best = (q.name == best.name)
-            color = "gold" if is_best else "white"
-            txt = (f"{q.name}  n={q.n_nodes}\n"
-                   f"β₀={q.beta0}  β₁={q.beta1}\n"
-                   f"λ₂={q.fiedler:.3g}\n"
-                   f"score={q.score:.2f}")
-            quad_labels[q.name].set_position((lx, ly))
-            quad_labels[q.name].set_text(txt)
-            quad_labels[q.name].set_color(color)
-            quad_labels[q.name].set_fontweight("bold" if is_best else "normal")
-
-        # Area histogram panel.
-        if n_local:
-            hist, edges = np.histogram(area[idx], bins=hist_bins)
+        # Area histogram panel — trait rocks in FoV only.
+        if n_traits_local:
+            hist, edges = np.histogram(area[trait_idx], bins=hist_bins)
             centers = 0.5 * (edges[:-1] + edges[1:])
             hist_bar.set_data(centers, np.maximum(hist, 1e-1))
             ax02.set_xlim(hist_bins[0], hist_bins[-1])
@@ -639,9 +744,9 @@ def run(args: argparse.Namespace) -> None:
         med_ecc_line.set_data(xs, [50.0 * r.median_ecc for r in records])
         ax11.relim(); ax11.autoscale_view()
 
-        # Cumulative explored scatter.
-        if seen_nodes:
-            sn = np.fromiter(seen_nodes, dtype=int)
+        # Cumulative explored scatter — trait rocks only (have area + ecc).
+        if seen_trait_nodes:
+            sn = np.fromiter(seen_trait_nodes, dtype=int)
             a_seen = area[sn]
             e_seen = ecc[sn]
             cum_scat.set_offsets(np.c_[a_seen, e_seen])
@@ -652,17 +757,17 @@ def run(args: argparse.Namespace) -> None:
 
         fig.suptitle(
             f"Bishop rocks explorer — step {step+1}/{args.steps}   "
+            f"policy={args.motion_policy}   "
             f"window=({cx:.1f}, {cy:.1f}) m   "
-            f"n_nodes={n_local}   β₀={n_comp}   β₁={beta1_full}   "
-            f"λ₂={fied_full:.3g}   →{best.name}  (score={best.score:.2f})",
+            f"graph_nodes={n_local}  traits={n_traits_local}   "
+            f"β₀={n_comp}   β₁={beta1_full}   "
+            f"λ₂={fied_full:.3g}   →{best_name}  (score={best_score:.2f})",
             fontsize=11,
         )
 
         return (
             path_line, window, dir_arrow, dir_head,
-            lc_knn, lc_rad, local_nodes,
-            quad_divider1, quad_divider2,
-            *quad_labels.values(),
+            lc_knn, local_nodes,
             hist_bar,
             nodes_line, comp_line, fied_line, beta1_line,
             med_area_line, med_ecc_line, cum_scat,
@@ -707,13 +812,12 @@ def run(args: argparse.Namespace) -> None:
             cy_m=[r.cy for r in records],
             n_nodes=[r.n_nodes for r in records],
             n_edges_knn=[r.n_edges_knn for r in records],
-            n_edges_rad=[r.n_edges_rad for r in records],
             beta0_components=[r.n_components for r in records],
             beta1_cycles=[r.beta1 for r in records],
             fiedler=[r.fiedler for r in records],
             median_area_m2=[r.median_area for r in records],
             median_eccentricity=[r.median_ecc for r in records],
-            chosen_quadrant=[r.chosen_quadrant for r in records],
+            chosen_direction=[r.chosen_direction for r in records],
             chosen_score=[r.chosen_score for r in records],
         )
     )
@@ -743,32 +847,51 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--window-m", type=float, default=40.0,
                    help="Scan window radius in metres (default: 40)")
     p.add_argument("--step-m", type=float, default=0.0,
-                   help="Spiral step size in metres (default: 0.6 * window-m)")
+                   help="Move step size in metres (default: 0.6 * window-m)")
     p.add_argument("--knn", type=int, default=6,
                    help="k for k-NN graph (default: 6)")
-    p.add_argument("--radius-m", type=float, default=10.0,
-                   help="Radius in metres for radius graph (default: 10)")
-    p.add_argument("--planner", choices=["quadrant", "spiral"], default="quadrant",
-                   help="Next-step planner. 'quadrant' (default) scores the 4 FoV "
-                        "quadrants by β₀/β₁/λ₂ and moves toward the best one; "
+    p.add_argument("--motion-policy", choices=["greedy", "spectral-leaf", "spiral"], default="greedy",
+                   help="Direction policy. 'greedy' (default) scores candidate move "
+                        "directions by local k-NN topology + unseen rocks; "
+                        "'spectral-leaf' uses only spectral/topological metrics "
+                        "(β0, β1, λ2, IPR(v2), novelty, momentum); "
                         "'spiral' walks a fixed outward spiral.")
     p.add_argument("--seed-x", type=float, default=None,
                    help="Starting x in metres (default: bbox centre)")
     p.add_argument("--seed-y", type=float, default=None,
                    help="Starting y in metres (default: bbox centre)")
     p.add_argument("--w-beta1", type=float, default=1.0,
-                   help="Weight on β₁ (cycles) in quadrant score")
+                   help="Weight on normalized β₁/n (cycle density) in greedy direction score")
     p.add_argument("--w-fiedler", type=float, default=20.0,
-                   help="Weight on Fiedler λ₂ (scaled by quadrant size)")
-    p.add_argument("--w-beta0", type=float, default=0.0,
-                   help="Weight on β₀ (components)")
+                   help="Weight on Fiedler λ₂ in greedy direction score")
+    p.add_argument("--w-beta0", type=float, default=0.5,
+                   help="Penalty weight on normalized β₀/n (fragmentation)")
     p.add_argument("--w-unseen", type=float, default=5.0,
-                   help="Weight on raw unseen-rock count per quadrant "
-                        "(exploration bonus; dominant driver after the first pass)")
+                   help="Weight on unseen-rock fraction in candidate next FoV")
     p.add_argument("--w-momentum", type=float, default=0.45,
-                   help="Momentum bonus as fraction of info score "
-                        "(cos(prev_dir, quad_dir) * w_momentum multiplies the "
-                        "quadrant score; keep < 1; prevents oscillation)")
+                   help="Momentum bonus term for directional continuity")
+    p.add_argument("--w-lambda-inv", type=float, default=3.0,
+                   help="Spectral-leaf: weight on inverse Fiedler term 1/(eps+λ₂)")
+    p.add_argument("--w-beta1-tree", type=float, default=2.0,
+                   help="Spectral-leaf: weight on tree-likeness proxy (1 - β₁/n)")
+    p.add_argument("--w-beta0-spectral", type=float, default=0.5,
+                   help="Spectral-leaf: weight on component density β₀/n")
+    p.add_argument("--w-ipr", type=float, default=1.5,
+                   help="Spectral-leaf: weight on IPR of Fiedler eigenvector")
+    p.add_argument("--w-novelty", type=float, default=1.0,
+                   help="Spectral-leaf: weight on metric novelty vs previous steps")
+    p.add_argument(
+        "--decision-noise-sigma",
+        type=float,
+        default=0.0,
+        help="Std-dev of Gaussian noise added to candidate scores (0 disables).",
+    )
+    p.add_argument(
+        "--decision-noise-seed",
+        type=int,
+        default=None,
+        help="Random seed for decision noise (for reproducible stochastic runs).",
+    )
     p.add_argument("--pause-s", type=float, default=0.08,
                    help="Seconds to pause between frames when --show")
     p.add_argument("--show", action="store_true",
