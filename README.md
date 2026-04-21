@@ -192,7 +192,7 @@ obs = observability_ratio(R_bps=2e5, P_phys_W=1e7, T_K=250.0)  # Mars dust devil
 print(f"log₁₀(R/İself) = {obs['log10_ratio']:.1f}  regime: {obs['regime']}")
 ```
 
-### Drone DEM adaptive mapping (`drone_dem_betti_adaptive_experiment.py`)
+### Drone DEM adaptive mapping (`examples/controller/drone_dem_betti_adaptive_experiment.py`)
 
 ![Drone DEM adaptive mapping — realtime run, step 52/200, FoV 53x53, global DEM and `DEM in FOV` panels share the `terrain` colormap and elevation limits; bottom-right shows the mask+graph with β₀=8, β₁=0, Fiedler=0, 8 components](drone_dem_figures/explorer/drone_dem_explorer_live.png)
 
@@ -245,7 +245,7 @@ Key capabilities:
 Phoenix/Tonto example (HydroSHEDS 3 arc-second):
 
 ```bash
-python3 drone_dem_betti_adaptive_experiment.py \
+python3 examples/controller/drone_dem_betti_adaptive_experiment.py \
     --dem-tiff "datasets/hydroshed-dem/na_con_3s/na_con_3s.tif" \
     --bbox-lonlat="-112.6,33.2,-110.6,34.3" \
     --bbox-crop-name "phoenix_tonto_bbox.tif" \
@@ -270,7 +270,7 @@ python3 drone_dem_betti_adaptive_experiment.py \
 RivGraph extractor mode with mask closing / endpoint bridging for more connected trees:
 
 ```bash
-python3 drone_dem_betti_adaptive_experiment.py \
+python3 examples/controller/drone_dem_betti_adaptive_experiment.py \
     --dem-tiff "datasets/hydroshed-dem/na_con_3s/na_con_3s.tif" \
     --bbox-lonlat="-112.6,33.2,-110.6,34.3" \
     --nodata-value 32767 \
@@ -299,6 +299,20 @@ Tuning for more/fewer connected components:
   `--bridge-endpoints-px 3.0` (tune 2–6 px).
 - Over-closing will fill small basins and inflate β₁ (fake holes); back off if
   β₁ spikes without matching physical cycles.
+
+RivGraph skeletal tuning CLI knobs (quick reference):
+
+- `--channel-extractor rivgraph` — switch to RivGraph skeleton/graph backend.
+- `--rivgraph-repo /path/to/RivGraph` — add your RivGraph clone (+ `_deps`) to
+  import path when it is not installed system-wide.
+- `--rivgraph-prune-dangling` — prune one-link dangling branches before Betti.
+- `--stream-percentile P` — threshold used to derive the binary stream mask from
+  DEM patches.
+- `--mask-close-px N` — morphological closing iterations (bridges short gaps).
+- `--mask-dilate-px N` — post-close dilation (fuses diagonal/near-parallel arms
+  before skeletonization).
+- `--bridge-endpoints-px D` — post-graph stitching radius in pixel units for
+  near-endpoint component merges (render/connectivity aid).
 
 Outputs are written under `--output-dir`:
 
