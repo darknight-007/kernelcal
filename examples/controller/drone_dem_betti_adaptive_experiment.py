@@ -8,21 +8,54 @@ What this script does
 1) Emulates a drone with a nadir DEM camera.
 2) Uses a square camera footprint derived from altitude + FOV angle.
 3) Captures DEM patches along a flight path.
-4) Computes stream-like topology per patch and Betti numbers (beta0, beta1).
-5) Chooses next waypoint with a Betti-adaptive mapping policy.
+4) Computes stream-like topology per patch: Betti numbers β₀ (connected
+   components) and β₁ (loops) of the stream-pixel graph.
+5) Chooses the next waypoint by splitting the current FoV into four diagonal
+   quadrants (NW/NE/SW/SE), scoring each by its local Betti topology::
+
+       score = w_beta1 * (β₁/n)   # topological complexity — P4 Δβ₁ signal
+             - w_beta0 * (β₀/n)   # fragmentation penalty (high β₀ = noisy mask)
+             + w_unseen * unseen   # exploration incentive
+
+   β₁/n measures braided-loop density in the channel graph — the per-node
+   Δβ₁ signal from P4 ("Spectral Kernel Dynamics as a Biosignature Framework").
+   β₀/n is negated: a single connected network (β₀=1) is preferred over many
+   disconnected fragments (β₀>>1).  n = graph node count normalises both to
+   [0, 1].  The drone moves to the outer corner of the winning quadrant
+   (step = side_px // 2 in each diagonal direction).
+
+kernelcal integration
+---------------------
+- ``d8_flow_direction`` / ``flow_accumulation`` → kernelcal.terrain.dem
+- Betti numbers (graph topology, consistent across extractors)
+  → kernelcal.terrain.graph_codec.combinatorial_betti
+- Abiotic null model for Δβ₁
+  → kernelcal.terrain.channels.abiotic_beta1_channels
+- Biosignature computation → kernelcal.terrain.biosig.topological_biosignature
+
 6) Writes summary plots of coverage, path, and topology history.
 
-Example
--------
-python3 drone_dem_betti_adaptive_experiment.py \
-  --steps 35 --altitude-m 120 --fov-deg 55 --dem-resolution-m 30 \
-  --output-dir datasets/hydroshed-dem/drone_betti_experiment
+Example (Tonto Basin HydroShed)
+--------------------------------
+::
+
+  python3 examples/controller/drone_dem_betti_adaptive_experiment.py \\
+    --dem-tiff datasets/hydroshed-dem/na_con_3s/na_con_3s.tif \\
+    --bbox-lonlat=-112.6,33.2,-110.6,34.3 \\
+    --nodata-value 32767 --dem-resolution-m 90 \\
+    --altitude-m 2000 --fov-deg 100 --steps 200 \\
+    --channel-extractor rivgraph --rivgraph-prune-dangling \\
+    --rivgraph-repo /home/jdas/Documents/manuscripts/rivgraph \\
+    --w-beta1 2.5 --w-beta0 0.5 --w-unseen 5.0 \\
+    --realtime --realtime-block \\
+    --output-dir datasets/hydroshed-dem/drone_betti_run
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import subprocess
 import sys
@@ -38,6 +71,37 @@ from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from matplotlib import colormaps as mpl_colormaps
+
+# ---------------------------------------------------------------------------
+# kernelcal.terrain integration
+# The script lives inside the kernelcal repo so these are always available.
+# They replace local duplicate implementations below.
+# ---------------------------------------------------------------------------
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    from kernelcal.terrain.dem import (
+        d8_flow_direction as _kt_d8_flow_direction,
+        flow_accumulation as _kt_flow_accumulation,
+    )
+    from kernelcal.terrain.graph_codec import combinatorial_betti as _kt_combinatorial_betti
+    from kernelcal.terrain.channels import abiotic_beta1_channels as _kt_abiotic_beta1
+    _KT_AVAILABLE = True
+except ImportError:  # graceful degradation when running outside repo
+    _KT_AVAILABLE = False
+
+# Shared quadrant-Betti scoring + tie-break + revisit penalty lives in
+# ``kernelcal.graph_explorer`` so the bishop-rocks k-NN explorer uses the
+# exact same policy as this one without duplicating the formula.
+from kernelcal.graph_explorer import (
+    BettiWeights,
+    CameraModel,
+    Candidate,
+    QUADRANT_OFFSETS_IMAGE,
+    choose_best_candidate,
+)
 
 
 _CC_CMAP = mpl_colormaps.get_cmap("tab20")
@@ -71,23 +135,6 @@ _D8_OFFSETS = np.array(
     dtype=int,
 )
 _D8_DIST = np.array([np.sqrt(2.0), 1.0, np.sqrt(2.0), 1.0, 1.0, np.sqrt(2.0), 1.0, np.sqrt(2.0)])
-
-
-@dataclass(frozen=True)
-class CameraModel:
-    altitude_m: float
-    fov_deg: float
-    dem_resolution_m: float
-
-    @property
-    def footprint_side_m(self) -> float:
-        half_angle = np.deg2rad(self.fov_deg * 0.5)
-        return 2.0 * self.altitude_m * np.tan(half_angle)
-
-    @property
-    def footprint_side_px(self) -> int:
-        px = int(round(self.footprint_side_m / self.dem_resolution_m))
-        return max(5, px)
 
 
 @dataclass
@@ -333,7 +380,13 @@ def synthetic_dem(nrows: int, ncols: int, seed: int) -> np.ndarray:
 
 
 def d8_flow_direction(dem: np.ndarray, resolution_m: float) -> np.ndarray:
-    """D8 steepest-descent routing (-1 marks sink)."""
+    """D8 steepest-descent routing (-1 marks sink).
+
+    Delegates to kernelcal.terrain.dem when available (avoids duplication).
+    """
+    if _KT_AVAILABLE:
+        return _kt_d8_flow_direction(dem, dx=resolution_m, dy=resolution_m)
+    # Local fallback (identical logic, kept for standalone use outside repo).
     z = np.asarray(dem, dtype=float)
     nrows, ncols = z.shape
     out = np.full((nrows, ncols), -1, dtype=np.int8)
@@ -358,7 +411,13 @@ def d8_flow_direction(dem: np.ndarray, resolution_m: float) -> np.ndarray:
 
 
 def flow_accumulation(fdir: np.ndarray) -> np.ndarray:
-    """Accumulate upstream contributing area (in cell counts)."""
+    """Accumulate upstream contributing area (in cell counts).
+
+    Delegates to kernelcal.terrain.dem when available (avoids duplication).
+    """
+    if _KT_AVAILABLE:
+        return _kt_flow_accumulation(fdir)
+    # Local fallback.
     nrows, ncols = fdir.shape
     acc = np.ones((nrows, ncols), dtype=np.int32)
     indeg = np.zeros((nrows, ncols), dtype=np.int32)
@@ -422,33 +481,6 @@ def stream_mask_from_patch(
     return mask & valid
 
 
-def betti_numbers_binary(mask: np.ndarray) -> tuple[int, int]:
-    """Compute beta0 and beta1 for a 2D binary mask.
-
-    beta0: # connected components in foreground.
-    beta1: # holes in foreground (background components not touching border).
-    """
-    m = np.asarray(mask, dtype=bool)
-    if m.size == 0:
-        return 0, 0
-
-    structure = np.ones((3, 3), dtype=np.int8)
-    _, n_fg = ndimage.label(m, structure=structure)
-
-    bg = ~m
-    labels_bg, n_bg = ndimage.label(bg, structure=structure)
-    border_ids = set()
-    border_ids.update(np.unique(labels_bg[0, :]).tolist())
-    border_ids.update(np.unique(labels_bg[-1, :]).tolist())
-    border_ids.update(np.unique(labels_bg[:, 0]).tolist())
-    border_ids.update(np.unique(labels_bg[:, -1]).tolist())
-    holes = 0
-    for lab in range(1, n_bg + 1):
-        if lab not in border_ids:
-            holes += 1
-    return int(n_fg), int(holes)
-
-
 def _count_components_graph(n_nodes: int, edges: list[tuple[int, int]]) -> int:
     if n_nodes <= 0:
         return 0
@@ -485,6 +517,8 @@ def _betti_from_rivgraph_links_nodes(links: dict, nodes: dict) -> tuple[int, int
     beta0 = _count_components_graph(n, edge_list)
     beta1 = max(0, e - n + beta0)
     return int(beta0), int(beta1)
+
+
 
 
 def _fiedler_from_graph(
@@ -571,6 +605,88 @@ def _fiedler_from_graph(
     return _dense_lambda2()
 
 
+def _fiedler_ipr_from_graph(
+    n_nodes: int,
+    edges: list[tuple[int, int]],
+    *,
+    normalized: bool = True,
+    mode: str = "largest_cc",
+) -> tuple[float, float]:
+    """Return (lambda_2, IPR(v2)) for a graph Laplacian.
+
+    IPR is the inverse participation ratio of the Fiedler eigenvector:
+        IPR(v) = sum(v^4) / (sum(v^2)^2)
+    Larger IPR indicates stronger localization.
+    """
+    m = int(n_nodes)
+    if m <= 1 or len(edges) == 0:
+        return 0.0, 0.0
+
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    for a, b in edges:
+        ai, bi = int(a), int(b)
+        if ai == bi:
+            continue
+        if not (0 <= ai < m and 0 <= bi < m):
+            continue
+        rows.extend([ai, bi])
+        cols.extend([bi, ai])
+        data.extend([1.0, 1.0])
+    if len(data) == 0:
+        return 0.0, 0.0
+
+    adj = sparse.coo_matrix((data, (rows, cols)), shape=(m, m)).tocsr()
+    n_comp, labels = csgraph.connected_components(adj, directed=False)
+
+    if n_comp > 1:
+        if mode != "largest_cc":
+            return 0.0, 0.0
+        counts = np.bincount(labels, minlength=n_comp)
+        biggest = int(np.argmax(counts))
+        keep = np.where(labels == biggest)[0]
+        if keep.size <= 1:
+            return 0.0, 0.0
+        remap = -np.ones(m, dtype=np.int64)
+        remap[keep] = np.arange(keep.size, dtype=np.int64)
+        sub_rows = remap[np.asarray(rows, dtype=np.int64)]
+        sub_cols = remap[np.asarray(cols, dtype=np.int64)]
+        mask = (sub_rows >= 0) & (sub_cols >= 0)
+        sub_rows = sub_rows[mask]
+        sub_cols = sub_cols[mask]
+        sub_data = np.asarray(data, dtype=float)[mask]
+        adj = sparse.coo_matrix(
+            (sub_data, (sub_rows, sub_cols)),
+            shape=(int(keep.size), int(keep.size)),
+        ).tocsr()
+        m = int(keep.size)
+
+    if m <= 1:
+        return 0.0, 0.0
+    lap = csgraph.laplacian(adj, normed=bool(normalized))
+
+    try:
+        k = 2 if m <= 32 else 3
+        vals_raw, vecs = eigsh(lap.astype(float), k=k, which="SA", return_eigenvectors=True)
+        order = np.argsort(np.real(vals_raw))
+        vals = np.real(vals_raw)[order]
+        if vals.size < 2:
+            return 0.0, 0.0
+        lam2 = float(max(0.0, vals[1]))
+        vecs = np.real(vecs[:, order])
+        v2 = vecs[:, 1] if vecs.shape[1] > 1 else None
+        if v2 is None:
+            return lam2, 0.0
+        denom = float(np.sum(v2 * v2))
+        if denom <= 1e-12:
+            return lam2, 0.0
+        ipr = float(np.sum(v2**4) / (denom * denom))
+        return lam2, ipr
+    except Exception:
+        return _fiedler_from_graph(n_nodes, edges, normalized=normalized, mode=mode), 0.0
+
+
 def _fiedler_from_rivgraph(links: dict, nodes: dict) -> float:
     """Fiedler value from a RivGraph links/nodes graph, with safe ID remapping.
 
@@ -596,6 +712,28 @@ def _fiedler_from_rivgraph(links: dict, nodes: dict) -> float:
             continue
         edges.add((i, j) if i < j else (j, i))
     return _fiedler_from_graph(m, sorted(edges), normalized=True)
+
+
+def _fiedler_ipr_from_rivgraph(links: dict, nodes: dict) -> tuple[float, float]:
+    node_ids = list(nodes.get("id", []))
+    if len(node_ids) == 0:
+        node_ids = list(range(len(nodes.get("idx", []))))
+    id_map = {int(nid): k for k, nid in enumerate(node_ids)}
+    m = len(id_map)
+    if m <= 1:
+        return 0.0, 0.0
+    edges: set[tuple[int, int]] = set()
+    for conn in links.get("conn", []):
+        if conn is None or len(conn) != 2:
+            continue
+        a, b = int(conn[0]), int(conn[1])
+        if a == b or a not in id_map or b not in id_map:
+            continue
+        i, j = id_map[a], id_map[b]
+        if i == j:
+            continue
+        edges.add((i, j) if i < j else (j, i))
+    return _fiedler_ipr_from_graph(m, sorted(edges), normalized=True)
 
 
 def _mask_graph_edge_list(mask: np.ndarray) -> tuple[int, list[tuple[int, int]]]:
@@ -655,7 +793,25 @@ def _load_rivgraph_modules() -> tuple[object, object]:
     return m2g, lnu
 
 
-def patch_channel_metrics(
+def _betti_from_edges(n_nodes: int, edge_list: list[tuple[int, int]]) -> tuple[int, int]:
+    """(β₀, β₁) from an explicit (n_nodes, edges) graph description.
+
+    Delegates to kernelcal.terrain.graph_codec.combinatorial_betti when
+    available; otherwise uses the local union-find fallback.
+    """
+    if n_nodes <= 0:
+        return 0, 0
+    if _KT_AVAILABLE:
+        edges_arr = (np.array(edge_list, dtype=np.int64).reshape(-1, 2)
+                     if edge_list else np.empty((0, 2), dtype=np.int64))
+        b0, b1 = _kt_combinatorial_betti(n_nodes, edges_arr)
+        return int(b0), int(b1)
+    b0 = _count_components_graph(n_nodes, edge_list)
+    b1 = max(0, len(edge_list) - n_nodes + b0)
+    return int(b0), int(b1)
+
+
+def patch_betti_n(
     patch_dem: np.ndarray,
     resolution_m: float,
     percentile: float,
@@ -664,8 +820,51 @@ def patch_channel_metrics(
     *,
     mask_close_px: int = 0,
     mask_dilate_px: int = 0,
-) -> tuple[int, int, float, float]:
-    """Compute (beta0, beta1, stream_fraction, fiedler) from a DEM patch."""
+) -> tuple[int, int, int]:
+    """Fast variant for scoring: returns (beta0, beta1, n_graph_nodes) only.
+
+    Skips Fiedler / IPR eigenvector computation — those are expensive and
+    are not used in the quadrant scoring formula.
+    """
+    smask = stream_mask_from_patch(
+        patch_dem,
+        resolution_m=resolution_m,
+        percentile=percentile,
+        close_iters=int(mask_close_px),
+        dilate_iters=int(mask_dilate_px),
+    )
+    if extractor == "simple":
+        n_nodes, edge_list = _mask_graph_edge_list(smask)
+        b0, b1 = _betti_from_edges(n_nodes, edge_list)
+        return b0, b1, int(n_nodes)
+
+    # RivGraph path: mask → skeleton → links/nodes → graph Betti (no spectral).
+    try:
+        m2g, lnu = _load_rivgraph_modules()
+        skel = m2g.skeletonize_mask(np.asarray(smask, dtype=bool))
+        links, nodes = m2g.skel_to_graph(skel)
+        if rivgraph_prune_dangling:
+            dangling = [conn[0] for conn in nodes.get("conn", []) if len(conn) == 1]
+            for lid in dangling:
+                links, nodes = lnu.delete_link(links, nodes, lid)
+        b0, b1 = _betti_from_rivgraph_links_nodes(links, nodes)
+        n_nodes = int(len(nodes.get("idx", [])))
+    except Exception:
+        b0, b1, n_nodes = 0, 0, 0
+    return int(b0), int(b1), n_nodes
+
+
+def patch_channel_spectral_metrics(
+    patch_dem: np.ndarray,
+    resolution_m: float,
+    percentile: float,
+    extractor: str,
+    rivgraph_prune_dangling: bool,
+    *,
+    mask_close_px: int = 0,
+    mask_dilate_px: int = 0,
+) -> tuple[int, int, float, float, float, int]:
+    """Compute (beta0, beta1, stream_fraction, fiedler, ipr_v2, n_graph_nodes)."""
     smask = stream_mask_from_patch(
         patch_dem,
         resolution_m=resolution_m,
@@ -675,10 +874,11 @@ def patch_channel_metrics(
     )
     stream_frac = float(np.mean(smask))
     if extractor == "simple":
-        beta0, beta1 = betti_numbers_binary(smask)
+        # Graph-topology Betti (cycle rank, consistent with rivgraph extractor).
         n_nodes, edge_list = _mask_graph_edge_list(smask)
-        fiedler = _fiedler_from_graph(n_nodes, edge_list)
-        return beta0, beta1, stream_frac, fiedler
+        beta0, beta1 = _betti_from_edges(n_nodes, edge_list)
+        fiedler, ipr = _fiedler_ipr_from_graph(n_nodes, edge_list)
+        return beta0, beta1, stream_frac, fiedler, ipr, int(n_nodes)
 
     # RivGraph path: mask -> skeleton -> links/nodes -> graph Betti.
     m2g, lnu = _load_rivgraph_modules()
@@ -693,9 +893,33 @@ def patch_channel_metrics(
             for lid in dangling:
                 links, nodes = lnu.delete_link(links, nodes, lid)
         beta0, beta1 = _betti_from_rivgraph_links_nodes(links, nodes)
-        fiedler = _fiedler_from_rivgraph(links, nodes)
+        fiedler, ipr = _fiedler_ipr_from_rivgraph(links, nodes)
+        n_nodes = int(len(nodes.get("idx", [])))
     except Exception:
-        beta0, beta1, fiedler = 0, 0, 0.0
+        beta0, beta1, fiedler, ipr, n_nodes = 0, 0, 0.0, 0.0, 0
+    return beta0, beta1, stream_frac, fiedler, ipr, n_nodes
+
+
+def patch_channel_metrics(
+    patch_dem: np.ndarray,
+    resolution_m: float,
+    percentile: float,
+    extractor: str,
+    rivgraph_prune_dangling: bool,
+    *,
+    mask_close_px: int = 0,
+    mask_dilate_px: int = 0,
+) -> tuple[int, int, float, float]:
+    """Compute (beta0, beta1, stream_fraction, fiedler) from a DEM patch."""
+    beta0, beta1, stream_frac, fiedler, _ipr, _n_nodes = patch_channel_spectral_metrics(
+        patch_dem,
+        resolution_m=resolution_m,
+        percentile=percentile,
+        extractor=extractor,
+        rivgraph_prune_dangling=rivgraph_prune_dangling,
+        mask_close_px=mask_close_px,
+        mask_dilate_px=mask_dilate_px,
+    )
     return beta0, beta1, stream_frac, fiedler
 
 
@@ -945,8 +1169,9 @@ def patch_channel_observation(
             # Robust fallback if RivGraph fails on a given small patch.
             pass
 
-    beta0, beta1 = betti_numbers_binary(smask)
+    # Graph-topology Betti (consistent with rivgraph branch above and scoring).
     n_nodes, edge_list = _mask_graph_edge_list(smask)
+    beta0, beta1 = _betti_from_edges(n_nodes, edge_list)
     fiedler = _fiedler_from_graph(n_nodes, edge_list)
     segments, segment_cc, node_r, node_c, node_cc = _mask_graph_segments(smask)
     if float(bridge_endpoints_px) > 0.0:
@@ -986,71 +1211,14 @@ def capture_square(dem: np.ndarray, row: int, col: int, side_px: int) -> tuple[n
     return dem[r0:r1, c0:c1], (r0, r1, c0, c1)
 
 
-def candidate_moves(center: tuple[int, int], step_px: int) -> list[tuple[int, int]]:
-    r, c = center
-    candidates = [(r, c)]
-    for dr in (-step_px, 0, step_px):
-        for dc in (-step_px, 0, step_px):
-            if dr == 0 and dc == 0:
-                continue
-            candidates.append((r + dr, c + dc))
-    return candidates
+# Diagonal quadrant definitions: (name, row_sign, col_sign)
+# Row grows south (+), col grows east (+).  Re-exported from the shared
+# ``kernelcal.graph_explorer`` subpackage so the bishop-rocks explorer can
+# use the same quadrant convention.
+_QUAD_DIRS: tuple[tuple[str, int, int], ...] = tuple(
+    (name, dr, dc) for name, (dr, dc) in QUADRANT_OFFSETS_IMAGE.items()
+)
 
-
-def candidate_moves_multi(center: tuple[int, int], step_levels: list[int]) -> list[tuple[int, int]]:
-    """Union of candidate moves at multiple step radii."""
-    out: list[tuple[int, int]] = [center]
-    seen = {center}
-    for step in step_levels:
-        for cand in candidate_moves(center, step_px=max(1, int(step))):
-            if cand not in seen:
-                out.append(cand)
-                seen.add(cand)
-    return out
-
-
-def fov_overlap_fraction(
-    current: tuple[int, int],
-    candidate: tuple[int, int],
-    side_px: int,
-) -> float:
-    """Fractional area overlap between two same-size square captures."""
-    dr = abs(int(candidate[0]) - int(current[0]))
-    dc = abs(int(candidate[1]) - int(current[1]))
-    overlap_r = max(0, int(side_px) - dr)
-    overlap_c = max(0, int(side_px) - dc)
-    area = max(1, int(side_px) * int(side_px))
-    return float((overlap_r * overlap_c) / area)
-
-
-def no_improvement_steps(records: list[CaptureRecord]) -> int:
-    """How many trailing steps since last global-best beta1."""
-    if not records:
-        return 0
-    best = max(r.beta1 for r in records)
-    c = 0
-    for r in reversed(records):
-        if r.beta1 < best:
-            c += 1
-        else:
-            break
-    return c
-
-
-def hotspot_centroid(records: list[CaptureRecord], top_k: int = 12) -> tuple[float, float] | None:
-    """Weighted centroid of highest-beta1 past captures."""
-    if len(records) == 0:
-        return None
-    vals = np.array([float(r.beta1) for r in records], dtype=float)
-    if np.max(vals) <= 0:
-        return None
-    k = int(min(max(1, top_k), len(records)))
-    idx = np.argsort(-vals)[:k]
-    w = vals[idx]
-    w = np.maximum(w, 1e-6)
-    rows = np.array([records[i].row for i in idx], dtype=float)
-    cols = np.array([records[i].col for i in idx], dtype=float)
-    return float(np.sum(rows * w) / np.sum(w)), float(np.sum(cols * w) / np.sum(w))
 
 
 def choose_next_location(
@@ -1064,119 +1232,106 @@ def choose_next_location(
     channel_extractor: str,
     rivgraph_prune_dangling: bool,
     w_beta1: float,
-    w_fiedler: float,
+    w_beta0: float,
     w_unseen: float,
-    w_relief: float,
-    min_valid_fraction: float,
-    stay_penalty: float,
-    w_hotspot: float,
-    w_momentum: float,
     revisit_penalty: float,
-    stagnation_patience: int,
-    target_overlap: float,
-    overlap_penalty: float,
+    min_valid_fraction: float,
     mask_close_px: int = 0,
     mask_dilate_px: int = 0,
 ) -> tuple[tuple[int, int], float, float, int, int]:
-    """Choose next waypoint by direct delta-Betti utility."""
-    target_overlap = float(np.clip(target_overlap, 0.05, 0.95))
-    base_step = max(2, int(round((1.0 - target_overlap) * side_px)))
-    step_px = base_step
-    no_improve = no_improvement_steps(records)
-    step_levels = [step_px]
-    if no_improve >= max(1, int(stagnation_patience)):
-        step_levels.append(2 * step_px)
-    if no_improve >= 2 * max(1, int(stagnation_patience)):
-        step_levels.append(3 * step_px)
+    """Score four diagonal quadrants and return the best next waypoint.
 
-    hot = hotspot_centroid(records, top_k=12)
-    cur_hot_dist = None
-    if hot is not None:
-        cur_hot_dist = float(np.hypot(current[0] - hot[0], current[1] - hot[1]))
+    The current FoV patch is divided into four diagonal quadrants (NW/NE/SW/SE).
+    Each quadrant's Betti topology is scored, and the drone targets the outer
+    corner of the winning quadrant (= outer edge of that quadrant relative to
+    the current footprint).
 
-    recent = {(r.row, r.col) for r in records[-20:]} if records else set()
-    prev_vec = None
-    if len(records) >= 2:
-        a = records[-2]
-        b = records[-1]
-        prev_vec = np.array([b.row - a.row, b.col - a.col], dtype=float)
+    Scoring, revisit penalty, and cyclic tie-break are delegated to
+    :func:`kernelcal.graph_explorer.choose_best_candidate` so the bishop-rocks
+    explorer can use the exact same policy.  This function only owns the
+    DEM-specific bit: extracting each quadrant's sub-graph to compute
+    ``(β₀, β₁, n_nodes, unseen_frac)``.
 
-    best = None
-    best_score = -np.inf
-    all_cands = candidate_moves_multi(current, step_levels=step_levels)
-    valid_cands: list[tuple[int, int]] = []
-    valid_meta: list[tuple[np.ndarray, tuple[int, int, int, int], float, int, int, float, float]] = []
+    Score = w_beta1*clip(β₁/n) − w_beta0*clip(β₀/n) + w_unseen*unseen
 
-    for cand in all_cands:
-        patch, (r0, r1, c0, c1) = capture_square(dem, cand[0], cand[1], side_px=side_px)
-        valid_frac = float(np.mean(np.isfinite(patch)))
-        if valid_frac < min_valid_fraction:
+    Returns (center, best_score, unseen_frac, beta0, beta1).
+    """
+    # Outer-edge step: half the footprint in each diagonal direction.
+    half = max(2, side_px // 2)
+
+    # Capture current patch and split into 4 diagonal sub-patches.
+    cur_patch, _ = capture_square(dem, current[0], current[1], side_px=side_px)
+    h, w = cur_patch.shape
+    hr, wc = h // 2, w // 2
+    quad_slices = {
+        "NW": (slice(0, hr),  slice(0, wc)),
+        "NE": (slice(0, hr),  slice(wc, w)),
+        "SW": (slice(hr, h),  slice(0, wc)),
+        "SE": (slice(hr, h),  slice(wc, w)),
+    }
+
+    candidates: list[Candidate] = []
+    for name, dr, dc in _QUAD_DIRS:
+        sub = cur_patch[quad_slices[name]]
+
+        # Skip quadrants with too much missing data.
+        if float(np.mean(np.isfinite(sub))) < min_valid_fraction:
             continue
-        unseen = 1.0 - float(np.mean(visited_mask[r0:r1, c0:c1]))
-        beta0, beta1, _, fiedler = patch_channel_metrics(
-            patch,
-            resolution_m=resolution_m,
-            percentile=stream_percentile,
-            extractor=channel_extractor,
-            rivgraph_prune_dangling=rivgraph_prune_dangling,
-            mask_close_px=int(mask_close_px),
-            mask_dilate_px=int(mask_dilate_px),
+
+        # Betti numbers on the sub-patch (fast path: no Fiedler/IPR).
+        b0, b1, n_nodes = patch_betti_n(
+            sub, resolution_m=resolution_m, percentile=stream_percentile,
+            extractor=channel_extractor, rivgraph_prune_dangling=rivgraph_prune_dangling,
+            mask_close_px=int(mask_close_px), mask_dilate_px=int(mask_dilate_px),
         )
-        relief = float(np.nanstd(patch))
-        valid_cands.append(cand)
-        valid_meta.append((patch, (r0, r1, c0, c1), unseen, beta0, beta1, relief, fiedler))
 
-    current_beta1 = float(records[-1].beta1) if records else 0.0
-    current_fiedler = float(records[-1].fiedler) if records else 0.0
+        # Target = outer corner of this quadrant.
+        target_r = int(np.clip(current[0] + dr * half, half, dem.shape[0] - half - 1))
+        target_c = int(np.clip(current[1] + dc * half, half, dem.shape[1] - half - 1))
 
-    for i, cand in enumerate(valid_cands):
-        patch, (r0, r1, c0, c1), unseen, beta0, beta1, relief, fiedler = valid_meta[i]
-        delta_beta1 = float(beta1) - current_beta1
-        delta_fiedler = float(fiedler) - current_fiedler
-        # Direct objective: immediate topology gain plus exploration regularizers.
-        score = (
-            w_beta1 * delta_beta1
-            + 0.4 * w_beta1 * float(beta1)
-            + w_fiedler * delta_fiedler
-            + 0.25 * w_fiedler * float(fiedler)
-            + w_unseen * unseen
-            + w_relief * (relief / 50.0)
+        # Unseen fraction at the target position.
+        _, (tr0, tr1, tc0, tc1) = capture_square(dem, target_r, target_c, side_px=side_px)
+        unseen = 1.0 - float(np.mean(visited_mask[tr0:tr1, tc0:tc1]))
+
+        candidates.append(Candidate(
+            name=name,
+            position=(target_r, target_c),
+            beta0=int(b0),
+            beta1=int(b1),
+            n_nodes=int(n_nodes),
+            unseen_frac=float(unseen),
+        ))
+
+    if not candidates:
+        # cur_patch already captured at function entry; reuse via patch_channel_metrics.
+        b0, b1, _, _ = patch_channel_metrics(
+            cur_patch, resolution_m=resolution_m, percentile=stream_percentile,
+            extractor=channel_extractor, rivgraph_prune_dangling=rivgraph_prune_dangling,
         )
-        overlap_frac = fov_overlap_fraction(current=current, candidate=cand, side_px=side_px)
-        score -= overlap_penalty * abs(overlap_frac - target_overlap)
+        return current, 0.0, 0.0, b0, b1
 
-        if hot is not None and cur_hot_dist is not None:
-            cand_hot_dist = float(np.hypot(cand[0] - hot[0], cand[1] - hot[1]))
-            score += w_hotspot * (cur_hot_dist - cand_hot_dist) / (side_px + 1e-6)
+    weights = BettiWeights(
+        w_beta1=float(w_beta1),
+        w_beta0=float(w_beta0),
+        w_unseen=float(w_unseen),
+        revisit_penalty=float(revisit_penalty),
+    )
+    recent_positions = [(r.row, r.col) for r in records[-20:]] if records else []
+    best, best_score, _scored = choose_best_candidate(
+        candidates,
+        weights,
+        recent_positions=recent_positions,
+        tie_break_index=len(records),
+    )
+    assert best is not None  # candidates is non-empty
+    return (
+        (int(best.position[0]), int(best.position[1])),
+        float(best_score),
+        float(best.unseen_frac),
+        int(best.beta0),
+        int(best.beta1),
+    )
 
-        if prev_vec is not None:
-            move_vec = np.array([cand[0] - current[0], cand[1] - current[1]], dtype=float)
-            n1 = float(np.linalg.norm(prev_vec))
-            n2 = float(np.linalg.norm(move_vec))
-            if n1 > 1e-9 and n2 > 1e-9:
-                cosang = float(np.dot(prev_vec, move_vec) / (n1 * n2))
-                score += w_momentum * cosang
-
-        if cand == current:
-            score -= stay_penalty
-        if cand in recent:
-            score -= revisit_penalty
-        if score > best_score:
-            center = ((r0 + r1) // 2, (c0 + c1) // 2)
-            best_score = score
-            best = (center, unseen, beta0, beta1)
-    if best is None:
-        patch, (r0, r1, c0, c1) = capture_square(dem, current[0], current[1], side_px=side_px)
-        beta0, beta1, _, _ = patch_channel_metrics(
-            patch,
-            resolution_m=resolution_m,
-            percentile=stream_percentile,
-            extractor=channel_extractor,
-            rivgraph_prune_dangling=rivgraph_prune_dangling,
-        )
-        return current, 0.0, 0.0, beta0, beta1
-    center, unseen, beta0, beta1 = best
-    return center, float(best_score), unseen, beta0, beta1
 
 
 def nearest_finite_cell(dem: np.ndarray) -> tuple[int, int]:
@@ -1230,16 +1385,21 @@ def run_experiment_on_dem(
     cam = CameraModel(
         altitude_m=args.altitude_m,
         fov_deg=args.fov_deg,
-        dem_resolution_m=args.dem_resolution_m,
+        resolution_m=args.dem_resolution_m,
     )
     side_px = cam.footprint_side_px
+    mission_params_line = (
+        f"mission: alt={args.altitude_m:g}m | fov={args.fov_deg:g}deg | "
+        f"wβ1={args.w_beta1:g} | wβ0={args.w_beta0:g}"
+    )
     visited = np.zeros_like(dem, dtype=bool)
     finite_frac = float(np.mean(np.isfinite(dem)))
     if args.channel_extractor == "rivgraph":
         configure_rivgraph_import(args.rivgraph_repo)
     print(
         f"[info] DEM shape={dem.shape}, finite_fraction={finite_frac:.3f}, "
-        f"footprint_px={side_px}, extractor={args.channel_extractor}, planner=direct"
+        f"footprint_px={side_px}, extractor={args.channel_extractor}, "
+        f"planner=quadrant-betti"
     )
     if side_px < 24:
         print(
@@ -1294,23 +1454,17 @@ def run_experiment_on_dem(
                 channel_extractor=args.channel_extractor,
                 rivgraph_prune_dangling=args.rivgraph_prune_dangling,
                 w_beta1=args.w_beta1,
-                w_fiedler=args.w_fiedler,
+                w_beta0=args.w_beta0,
                 w_unseen=args.w_unseen,
-                w_relief=args.w_relief,
-                min_valid_fraction=args.min_valid_fraction,
-                stay_penalty=args.stay_penalty,
-                w_hotspot=args.w_hotspot,
-                w_momentum=args.w_momentum,
                 revisit_penalty=args.revisit_penalty,
-                stagnation_patience=args.stagnation_patience,
-                target_overlap=args.target_overlap,
-                overlap_penalty=args.overlap_penalty,
+                min_valid_fraction=args.min_valid_fraction,
                 mask_close_px=int(getattr(args, "mask_close_px", 0)),
                 mask_dilate_px=int(getattr(args, "mask_dilate_px", 0)),
             )
             rec.score = float(score)
         else:
-            rec.score = float(beta1)
+            # Last step has no next-move score.
+            rec.score = 0.0
     return dem, visited, records, side_px
 
 
@@ -1345,16 +1499,21 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
     cam = CameraModel(
         altitude_m=args.altitude_m,
         fov_deg=args.fov_deg,
-        dem_resolution_m=args.dem_resolution_m,
+        resolution_m=args.dem_resolution_m,
     )
     side_px = cam.footprint_side_px
+    mission_params_line = (
+        f"mission: alt={args.altitude_m:g}m | fov={args.fov_deg:g}deg | "
+        f"wβ1={args.w_beta1:g} | wβ0={args.w_beta0:g}"
+    )
     visited = np.zeros_like(dem, dtype=bool)
     finite_frac = float(np.mean(np.isfinite(dem)))
     if args.channel_extractor == "rivgraph":
         configure_rivgraph_import(args.rivgraph_repo)
     print(
         f"[info] DEM shape={dem.shape}, finite_fraction={finite_frac:.3f}, "
-        f"footprint_px={side_px}, extractor={args.channel_extractor}, planner=direct"
+        f"footprint_px={side_px}, extractor={args.channel_extractor}, "
+        f"planner=quadrant-betti"
     )
     if side_px < 24:
         print(
@@ -1426,7 +1585,6 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
         fontsize=8,
         framealpha=0.7,
     )
-
     # Local extracted mask + local graph panel
     local_mask_img = ax12.imshow(np.zeros((side_px, side_px), dtype=float), cmap="gray", origin="upper", vmin=0.0, vmax=1.0)
     lc_local_graph = LineCollection([], linewidths=1.0, alpha=0.9)
@@ -1517,23 +1675,17 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
                 channel_extractor=args.channel_extractor,
                 rivgraph_prune_dangling=args.rivgraph_prune_dangling,
                 w_beta1=args.w_beta1,
-                w_fiedler=args.w_fiedler,
+                w_beta0=args.w_beta0,
                 w_unseen=args.w_unseen,
-                w_relief=args.w_relief,
-                min_valid_fraction=args.min_valid_fraction,
-                stay_penalty=args.stay_penalty,
-                w_hotspot=args.w_hotspot,
-                w_momentum=args.w_momentum,
                 revisit_penalty=args.revisit_penalty,
-                stagnation_patience=args.stagnation_patience,
-                target_overlap=args.target_overlap,
-                overlap_penalty=args.overlap_penalty,
+                min_valid_fraction=args.min_valid_fraction,
                 mask_close_px=int(getattr(args, "mask_close_px", 0)),
                 mask_dilate_px=int(getattr(args, "mask_dilate_px", 0)),
             )
             rec.score = float(score)
         else:
-            rec.score = float(beta1)
+            # Last step has no next-move score.
+            rec.score = 0.0
 
         # Live update
         xs.append(rec.col)
@@ -1614,7 +1766,10 @@ def run_experiment_realtime(args: argparse.Namespace) -> tuple[np.ndarray, np.nd
         ax11.set_xlim(0, max(1, args.steps - 1))
         ax11.set_ylim(-0.05, max(1.0, max(score_hist + unseen_hist + stream_hist) + 0.1))
 
-        fig.suptitle(f"Realtime adaptive flight step {step + 1}/{args.steps}", fontsize=12)
+        fig.suptitle(
+            f"Realtime adaptive flight step {step + 1}/{args.steps}\n{mission_params_line}",
+            fontsize=11,
+        )
         fig.canvas.draw_idle()
         plt.pause(max(0.001, float(args.realtime_pause_s)))
 
@@ -1716,6 +1871,10 @@ def save_animation(
     stream_percentile: float,
     channel_extractor: str,
     rivgraph_prune_dangling: bool,
+    altitude_m: float,
+    fov_deg: float,
+    w_beta1: float,
+    w_beta0: float,
     mask_close_px: int = 0,
     mask_dilate_px: int = 0,
     bridge_endpoints_px: float = 0.0,
@@ -1729,6 +1888,10 @@ def save_animation(
     nrows, ncols = dem.shape
     visited_prog = np.zeros((nrows, ncols), dtype=bool)
     half = side_px // 2
+    mission_params_line = (
+        f"mission: alt={altitude_m:g}m | fov={fov_deg:g}deg | "
+        f"wβ1={w_beta1:g} | wβ0={w_beta0:g}"
+    )
 
     fig, ax = plt.subplots(2, 3, figsize=(16, 10), constrained_layout=True)
     ax00, ax01, ax02 = ax[0, 0], ax[0, 1], ax[0, 2]
@@ -1922,7 +2085,10 @@ def save_animation(
         unseen_line.set_data(t[: frame_idx + 1], unseen[: frame_idx + 1])
         stream_line.set_data(t[: frame_idx + 1], stream[: frame_idx + 1])
 
-        fig.suptitle(f"Adaptive flight step {frame_idx + 1}/{len(records)}", fontsize=12)
+        fig.suptitle(
+            f"Adaptive flight step {frame_idx + 1}/{len(records)}\n{mission_params_line}",
+            fontsize=11,
+        )
         return (
             path_line,
             fov_rect,
@@ -1953,18 +2119,34 @@ def save_animation(
         repeat=False,
     )
 
-    gif_path = out_dir / "drone_betti_adaptive_animation.gif"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = (
+        f"drone_betti_steps{len(records)}"
+        f"_alt{altitude_m:g}m_fov{fov_deg:g}deg"
+        f"_wb1_{w_beta1:g}_wb0_{w_beta0:g}"
+        f"_{channel_extractor}_fps{max(1, fps)}_{ts}"
+    )
+    mp4_path = out_dir / f"{base_name}.mp4"
+    gif_path = out_dir / f"{base_name}.gif"
     try:
-        writer = mpl_animation.PillowWriter(fps=max(1, fps))
-        ani.save(gif_path, writer=writer, dpi=120)
-        plt.close(fig)
-        return gif_path
-    except Exception:
-        mp4_path = out_dir / "drone_betti_adaptive_animation.mp4"
-        writer = mpl_animation.FFMpegWriter(fps=max(1, fps))
-        ani.save(mp4_path, writer=writer, dpi=120)
+        mp4_writer = mpl_animation.FFMpegWriter(fps=max(1, fps))
+        ani.save(mp4_path, writer=mp4_writer, dpi=120)
+        if not (mp4_path.exists() and mp4_path.stat().st_size > 0):
+            raise RuntimeError(f"MP4 writer completed but file is empty: {mp4_path}")
+
+        gif_writer = mpl_animation.PillowWriter(fps=max(1, fps))
+        ani.save(gif_path, writer=gif_writer, dpi=120)
+        if not (gif_path.exists() and gif_path.stat().st_size > 0):
+            raise RuntimeError(f"GIF writer completed but file is empty: {gif_path}")
+
         plt.close(fig)
         return mp4_path
+    except Exception as export_err:
+        plt.close(fig)
+        raise RuntimeError(
+            "Failed to create required animation outputs (MP4 + GIF). "
+            f"Expected files: {mp4_path} and {gif_path}"
+        ) from export_err
 
 
 def write_csv(records: list[CaptureRecord], out_dir: Path) -> Path:
@@ -2045,28 +2227,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="When using rivgraph extractor, prune dangling one-link branches before Betti.",
     )
-    p.add_argument("--w-beta1", type=float, default=2.5)
-    p.add_argument("--w-fiedler", type=float, default=1.0)
-    p.add_argument("--w-unseen", type=float, default=1.5)
-    p.add_argument("--w-relief", type=float, default=0.7)
-    p.add_argument("--w-hotspot", type=float, default=1.2)
-    p.add_argument("--w-momentum", type=float, default=0.35)
-    p.add_argument("--revisit-penalty", type=float, default=0.5)
-    p.add_argument("--stagnation-patience", type=int, default=10)
+    p.add_argument("--w-beta1", type=float, default=2.5,
+                   help="Weight on normalised β₁ (loop density) per candidate patch.")
+    p.add_argument("--w-beta0", type=float, default=0.5,
+                   help="Penalty weight on normalised β₀ (fragmentation). "
+                        "Higher values steer away from patches with many disconnected "
+                        "components (typical of noisy masks).")
+    p.add_argument("--w-unseen", type=float, default=5.0,
+                   help="Weight on unseen (unexplored) fraction of candidate patch.")
+    p.add_argument("--revisit-penalty", type=float, default=0.5,
+                   help="Score penalty applied when a candidate was recently visited.")
     p.add_argument(
         "--target-overlap",
         type=float,
-        default=0.5,
-        help="Desired overlap fraction between consecutive square FOV captures.",
-    )
-    p.add_argument(
-        "--overlap-penalty",
-        type=float,
-        default=1.2,
-        help="Penalty weight for deviating from --target-overlap during move scoring.",
+        default=0.3,
+        help="(Retained for backward compat; step is fixed at side_px // 2 in quadrant mode.)",
     )
     p.add_argument("--min-valid-fraction", type=float, default=0.6)
-    p.add_argument("--stay-penalty", type=float, default=0.25)
     p.add_argument(
         "--mask-close-px",
         type=int,
@@ -2124,7 +2301,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("datasets/hydroshed-dem/drone_betti_experiment"),
+        default=Path("/home/jdas/Documents/kernelcal/video-demos/hydroshed"),
     )
     return p.parse_args()
 
@@ -2149,6 +2326,10 @@ def main() -> None:
             stream_percentile=args.stream_percentile,
             channel_extractor=args.channel_extractor,
             rivgraph_prune_dangling=args.rivgraph_prune_dangling,
+            altitude_m=args.altitude_m,
+            fov_deg=args.fov_deg,
+            w_beta1=args.w_beta1,
+            w_beta0=args.w_beta0,
             mask_close_px=int(getattr(args, "mask_close_px", 0)),
             mask_dilate_px=int(getattr(args, "mask_dilate_px", 0)),
             bridge_endpoints_px=float(getattr(args, "bridge_endpoints_px", 0.0)),
@@ -2160,7 +2341,10 @@ def main() -> None:
     print(f"Coverage fraction    : {np.mean(visited):.4f}")
     print(f"Summary plot         : {png}")
     if anim_path is not None:
-        print(f"Animation            : {anim_path}")
+        print(f"Animation (MP4)      : {anim_path}")
+        gif_sibling = anim_path.with_suffix(".gif")
+        if gif_sibling.exists():
+            print(f"Animation (GIF)      : {gif_sibling}")
     print(f"Capture CSV          : {csv_path}")
 
 

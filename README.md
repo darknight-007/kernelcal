@@ -52,6 +52,7 @@ The paper treats the kernel $k : \mathcal{X} \times \mathcal{X} \to \mathbb{R}$ 
 | `kernelcal.bandits` | **Decentralised Dynamic-Kernel GP-UCB (DDK-GPUCB):** spatiotemporal bandit simulation with learnable mixture kernels, gossip consensus, and Chebyshev-accelerated mixing |
 | `kernelcal.geo3d` | **Spectral compression for 3D geometry:** point clouds, triangle meshes (DAE/OBJ), and temporal LiDAR sequences. Hodge Laplacian complex (L₀/L₁/L₂), persistent homology (0D/1D), compression ratio bounds, Nyström large-mesh path. **`score_compression()`** self-introspection: four-channel quality report (geometry / spectral / kernel / topology) with composite loss and grade. **`decoder.py`** three-stage receiving pipeline: skeleton reconstruction (Theorem 1 topology guard) + D_m conservation-deficit gate + detail dispatch. **`detail_synthesis.py`** five detail methods: fractal noise (H[h*] → roughness), curl-gated flow textures (E_curl), latent-code scene library, landmark Poisson pinning, D_m octave boost. |
 | `kernelcal.terrain` | **Planetary terrain analysis and topological biosignature detection** (P2, P3, P4). DEM→graph pipeline (D8 flow routing, slope/curvature), crater rim detection and Betti numbers, drainage network graphs (Strahler ordering, max-flow/min-cut), the triple spectral diagnostic for channel detection (Proposition 3, P2), **critical-node fragmentation diagnostics** (group-betweenness critical sets, pairwise-connectivity decay, sub-basin growth), topological biosignature Δβ₁, cross-kernel factorization test, plume spectral entropy biosignature, fixed-point kernel, stability–conservation tradeoff (Route 3), bandwidth-optimal mode selection, observability ratio. **70 tests, stdlib-only (numpy + scipy).** |
+| `kernelcal.graph_explorer` | **Shared quadrant-Betti exploration policy** used by both the drone-DEM explorer and the Bishop rocks explorer so the planner is defined exactly once (P4 §P4 Δβ₁ biosignature signal). `BettiWeights`, `Candidate`, `ScoredCandidate`, `score_betti_candidate`, `choose_best_candidate` for the canonical `w_beta1·β₁/n − w_beta0·β₀/n + w_unseen·unseen` score with revisit penalty and deterministic cyclic tie-break; plus `CameraModel` (altitude + FOV → square footprint side) and `CoverageRaster` (bool visited-mask over a metric bbox for `1 − mean(visited[target])` pixel-area unseen). 25 tests (`tests/test_graph_explorer.py`). |
 | `kernelcal.core` | Stable compatibility facade for downstream integrations: `FixedPointDetector`, `KernelTrajectory`, `MaxCalSampler` |
 | `kernelcal.navigation` | Kernel-aware autonomy primitives: semantic SLAM kernel tracking, informative path planning, pilot demonstration learning, novelty/stability-aware velocity control |
 | `kernelcal.video` | Depth/LiDAR spectral stream codec with Hilbert-Schmidt novelty tracking and optional ROS2 bridge |
@@ -308,102 +309,151 @@ Outputs are written under `--output-dir`:
 - `drone_betti_adaptive_animation.gif` (or `.mp4` fallback, unless `--no-animation`)
 - `capture_metrics.csv`
 
-### Bishop rocks graph explorer (`bishop_rocks_graph_explorer.py`)
+### Bishop rocks graph explorer (`examples/bishop/bishop_rocks_graph_explorer.py`)
 
-![Bishop rocks graph explorer — greedy run, step 80/80, local graph/topology/trait diagnostics and cumulative exploration](bishop_figures/rocks_explorer/bishop_rocks_explorer_live.png)
+![Bishop rocks graph explorer — quadrant-Betti run, local graph/topology/trait diagnostics and cumulative exploration](bishop_figures/rocks_explorer/bishop_rocks_explorer_live.png)
 
-*Greedy run at step 80/80. **(0,0)** full scarp map, rocks coloured by
-relative elevation, crimson scan window + path, gold arrow for chosen next
-move. **(0,1)** local FoV k-NN graph (cyan edges, node color = component).
-**(0,2)** area histogram in-window. **(1,0)** topology history (`n_nodes`,
-`n_components`, β₁ cycles, Fiedler × 10). **(1,1)** trait medians.
-**(1,2)** cumulative explored rocks (eccentricity vs area, coloured by step).*
+*Quadrant-Betti run. **(0,0)** full scarp map, rocks coloured by relative
+elevation, crimson scan window + path, gold arrow to the next target.
+**(0,1)** local FoV k-NN graph (cyan edges, node color = connected
+component). **(0,2)** area histogram in-window. **(1,0)** topology history
+(`n_nodes`, `n_components`, β₁ cycles, Fiedler × 10). **(1,1)** trait
+medians. **(1,2)** cumulative explored rocks (eccentricity vs area,
+coloured by discovery order).*
 
-Point-data analogue of the drone DEM adaptive mapping above: the graph is
-built over **rock centroids** from the Bishop scarp Mask R-CNN inventory
-(`rocks-coord-list.csv` ≈ 82k rocks, `rock_traits_full.csv` ≈ 14k traits),
-not DEM pixels. A circular FoV of radius `--window-m` slides across the
-scarp and, at each step:
+Point-cloud analogue of the drone-DEM adaptive mapping above, with the
+**exact same exploration policy** (shared via `kernelcal.graph_explorer`).
+The only algorithmic difference is the graph constructor: the DEM explorer
+extracts a channel-network graph from each DEM patch, while the Bishop
+explorer builds a **k-NN graph over rock centroids** from the Bishop scarp
+Mask R-CNN inventory (`rocks-coord-list.csv` ≈ 82k rocks,
+`rock_traits_full.csv` ≈ 14k measured traits).
+
+At each step it:
 
 1. Projects all lon/lat to a local equirectangular frame in **metres**.
-2. Uses all rocks in-window as nodes, but adds k-NN edges **only between
-   rocks that have trait rows** in `rock_traits_full.csv` (trait-missing
-   rocks remain isolated).
-3. Computes β₀ (components), β₁ = E − V + β₀ (cycles), and Fiedler λ₂ on
-   the local k-NN Laplacian.
-4. Scores directional candidates (E/NE/N/NW/W/SW/S/SE/STAY) by normalized
-   topology + unseen fraction:
+2. Paints the current square footprint on a shared
+   `kernelcal.graph_explorer.CoverageRaster` (Bishop analog of the DEM
+   explorer's `visited` numpy mask) at `--scarp-resolution-m` pixel size,
+   so `unseen_frac` at every future candidate uses the exact same
+   `1 − mean(visited[target_patch])` rule as the DEM explorer.
+3. Collects all rocks inside the square window and builds a local k-NN
+   graph where edges are restricted to **trait-linked** rocks (optionally
+   further restricted to rocks ≥ `--min-edge-diameter-m`).
+4. Runs `scipy` connected-components and the smallest nonzero Laplacian
+   eigenvalue (Fiedler) on the local graph for β₀ / β₁ / λ₂.
+5. Splits the scan window into four diagonal rock quadrants
+   (NW/NE/SW/SE), computes β₀/β₁ on each quadrant's sub-k-NN graph, and
+   calls the shared `choose_best_candidate` ranker — identical to
+   `choose_next_location` in the drone-DEM explorer — to pick the next
+   waypoint. The explorer teleports to the outer corner of the winning
+   quadrant (same "jump to `(target_r, target_c)`" motion model as DEM).
 
-   ```
-   score = w_beta1*(β₁/n) + w_fiedler*λ₂ - w_beta0*(β₀/n) + w_unseen*unseen_frac
-   ```
+**Camera / footprint** comes from `CameraModel` (shared with DEM): square
+nadir footprint of side `2·altitude·tan(fov/2)` at the drone altitude,
+rasterized to the coverage grid via `--scarp-resolution-m`.
 
-   plus momentum, anti-backtrack/loop penalties, and optional Gaussian
-   decision noise.
-5. Steps toward the winning direction (`--step-m`, default `0.6 * window-m`).
+**Score (identical to DEM)**:
 
-Live 2×3 panel figure (mirrors `drone_dem_betti_adaptive_experiment.py`):
+```
+score = w_beta1·clip(β₁/n, 0, 1)
+      − w_beta0·clip(β₀/n, 0, 1)
+      + w_unseen·unseen_frac
+      − revisit_penalty  (if target matches a recent visit)
+```
 
-- **(0,0)** Full scarp map — rocks colored by area (log scale), crimson scan
-  window, crimson path trail, gold arrow for the chosen next move.
-- **(0,1)** Local k-NN graph inside the FoV with cyan edges; nodes are
-  coloured by connected component (`tab20`).
-- **(0,2)** Log-log area histogram of rocks in the current window.
-- **(1,0)** Rolling topology history: `n_nodes`, `n_components` (β₀),
-  β₁ (cycles), Fiedler λ₂.
-- **(1,1)** Rolling trait medians inside the window
-  (median `area_m²`, median `eccentricity`).
-- **(1,2)** Cumulative explored rocks — eccentricity vs area colored by
-  discovery order.
+Default run (writes both MP4 and GIF to `~/Documents/kernelcal/video-demos/bishop/`):
 
-Greedy directional planner (default):
+```bash
+export KERNELCAL_BISHOP_DATA_DIR=/path/to/bishop-root   # or use --data-dir
+python3 examples/bishop/bishop_rocks_graph_explorer.py
+```
+
+Live interactive window instead of a saved animation:
+
+```bash
+python3 examples/bishop/bishop_rocks_graph_explorer.py --steps 80 --show
+```
+
+Custom camera and planner weights (the CLI knobs mirror DEM 1-to-1):
 
 ```bash
 python3 examples/bishop/bishop_rocks_graph_explorer.py \
-    --data-dir /path/to/bishop-root \
-    --steps 80 --window-m 40 --knn 6 \
-    --motion-policy greedy \
-    --w-beta1 1.0 --w-beta0 0.5 --w-fiedler 20 --w-unseen 5 --w-momentum 0.45 \
-    --decision-noise-sigma 0.05 --decision-noise-seed 42 \
-    --show
+    --altitude-m 50 --fov-deg 90 --scarp-resolution-m 0.25 \
+    --steps 120 --knn 8 \
+    --w-beta1 2.5 --w-beta0 0.5 --w-unseen 5.0 --revisit-penalty 0.5
 ```
 
-Fixed outward-spiral planner (reference, no β-adaptivity):
+Drop sub-5 cm pebbles from the graph topology while keeping them as nodes
+(useful for questioning imputation assumptions without re-running it):
 
 ```bash
-python3 examples/bishop/bishop_rocks_graph_explorer.py --motion-policy spiral --steps 120
+python3 examples/bishop/bishop_rocks_graph_explorer.py --min-edge-diameter-m 0.05
 ```
 
-Live interactive window:
+**Trait imputation.** Most `rocks-coord-list.csv` entries do not have a
+matching row in `rock_traits_full.csv`. By default the explorer imputes
+them as 2 cm circular pebbles (`--fallback-diameter-m 0.02`, eccentricity
+0, area `π·(d/2)²`) so they can participate in the graph. Disable with
+`--no-impute-missing-traits` to restrict the graph to measured rocks only.
 
-```bash
-python3 examples/bishop/bishop_rocks_graph_explorer.py --show
-```
+**Live 2×3 figure** (same layout as DEM):
 
-Outputs (to `--out`, default `bishop_figures/rocks_explorer/`):
+- **(0,0)** Full scarp map — rocks coloured by elevation (or area fallback),
+  crimson scan rectangle + path, gold arrow pointing to the target.
+- **(0,1)** Local k-NN graph inside the FoV with cyan edges; nodes coloured
+  by connected component (`tab20`).
+- **(0,2)** Log-log area histogram of rocks in the current window.
+- **(1,0)** Rolling topology history: `n_nodes`, β₀, β₁, Fiedler λ₂.
+- **(1,1)** Rolling trait medians (`area_m²`, `eccentricity`).
+- **(1,2)** Cumulative explored rocks — eccentricity vs area coloured by
+  discovery order.
+
+**Outputs** (to `--out`, default `~/Documents/kernelcal/video-demos/bishop/`):
 
 - `bishop_rocks_explorer_final.png` — last frame of the exploration
 - `bishop_rocks_explorer_summary.csv` — per-step
-  `cx, cy, n_nodes, n_edges_knn,
-   beta0_components, beta1_cycles, fiedler,
-   median_area_m2, median_eccentricity,
-   chosen_direction, chosen_score`
-- `bishop_rocks_explorer_adaptive.mp4` / `.gif` when `--save-mp4` /
-  `--save-gif` is used.
+  `cx, cy, n_nodes, n_edges_knn, beta0_components, beta1_cycles, fiedler,
+   median_area_m2, median_eccentricity, chosen_direction, chosen_score`
+  (`chosen_direction` is one of `NW`/`NE`/`SW`/`SE` or `STAY` on the
+  drift-to-centre fallback)
+- By default **both**
+  `bishop_rocks_steps{N}_alt{A}m_fov{F}deg_side{W}m_step{S}m_knn{K}_fps{F}_{YYYYMMDD_HHMMSS}.mp4`
+  **and** `.gif` are written (same filename convention as DEM, minus the
+  policy segment since there is only one policy). Pass `--no-animation`
+  to skip, or `--save-mp4 PATH` / `--save-gif PATH` to override one
+  format's destination (both formats are still produced). Each file is
+  validated for non-zero size post-write.
 
-Companion script `plot_bishop_rocks.py` generates the two static summaries
-used upstream of the explorer:
+**Shared code.** The explorer delegates all scoring, revisit penalty,
+tie-break, camera geometry, and coverage bookkeeping to
+`kernelcal.graph_explorer` (`BettiWeights`, `Candidate`,
+`score_betti_candidate`, `choose_best_candidate`, `CameraModel`,
+`CoverageRaster`). The drone-DEM explorer calls the same symbols, so the
+two scripts differ *only* in how the local graph is constructed
+(channel-network extraction from a DEM patch vs. k-NN graph over rock
+centroids).
+
+**Tests:**
+
+- `tests/test_graph_explorer.py` — 25 cases covering `BettiWeights` scoring,
+  tie-break, revisit penalty, `CameraModel.footprint_side_m`, and
+  `CoverageRaster` coverage bookkeeping.
+- `tests/test_bishop_rocks_explorer.py` — 26 cases covering `LocalFrame`,
+  k-NN edges, Fiedler on path / disconnected graphs, trait imputation,
+  per-coord circular-equivalent diameter, the `--min-edge-diameter-m`
+  filter, the quadrant-Betti candidate builder, and a guard that fails
+  if retired motion-policy APIs (`MOVE_DIRS`, `spiral_path`, etc.)
+  re-appear.
+
+Companion script `examples/bishop/plot_bishop_rocks.py` generates the two
+static summaries used upstream of the explorer:
 
 ```bash
-python3 plot_bishop_rocks.py --data-dir datasets/bishop_scarp \
+python3 examples/bishop/plot_bishop_rocks.py --data-dir /path/to/bishop-root \
     --out bishop_figures
 # -> bishop_rocks_map.png, bishop_rocks_traits_hist.png
 ```
-
-Tests: `tests/test_bishop_rocks_explorer.py` (18 cases — `LocalFrame`,
-`knn_edges` / `radius_edges` properties, Fiedler values on path / disconnected
-graphs, `quadrant_metrics` ordering, momentum bonus, unseen-rock bonus, and
-`spiral_path` bbox-clamping).
 
 ### MaxCal adaptive sampler
 
@@ -1289,6 +1339,45 @@ Cite the arXiv papers for the framework, **in preparation** manuscripts when cit
 ## Changelog
 
 ### Unreleased
+- **New: `kernelcal.graph_explorer` shared planner subpackage** — extracts the
+  drone-DEM / Bishop scarp common exploration logic so the policy is defined
+  exactly once
+  - `planner.py`: `BettiWeights`, `Candidate`, `ScoredCandidate`,
+    `score_betti_candidate`, `choose_best_candidate` (canonical
+    `w_beta1·β₁/n − w_beta0·β₀/n + w_unseen·unseen` score with revisit
+    penalty and deterministic cyclic tie-break)
+  - `camera.py`: `CameraModel` — `altitude_m` + `fov_deg` + `resolution_m`
+    → square nadir footprint side (`2·altitude·tan(fov/2)`) and pixel count
+  - `coverage.py`: `CoverageRaster` — shared bool visited-mask over a
+    metric bbox; `paint_footprint`, `unseen_fraction_at` for identical
+    area-based `unseen_frac` semantics on DEM pixels and rock positions
+  - 25 unit tests in `tests/test_graph_explorer.py`
+- **Bishop explorer rebuilt on shared planner** — `bishop_rocks_graph_explorer.py`
+  now matches `drone_dem_betti_adaptive_experiment.py` in motion model,
+  camera geometry, and unseen bookkeeping; the only remaining difference is
+  graph construction (k-NN over rock centroids vs. channel-network over DEM)
+  - Removed legacy `greedy` / `spectral-leaf` / `spiral` motion policies,
+    `--motion-policy` / `--window-m` / `--w-fiedler` / `--w-momentum` /
+    `--w-lambda-inv` / `--w-beta1-tree` / `--w-beta0-spectral` / `--w-ipr` /
+    `--w-novelty` / `--decision-noise-sigma` / `--decision-noise-seed`
+    CLI flags and their `MOVE_DIRS` / `spiral_path` / `fiedler_value_and_ipr`
+    / `_normalize` / `radius_edges` / `quadrant_metrics` code paths
+  - Adopted DEM-style `--altitude-m` / `--fov-deg` / `--scarp-resolution-m`
+    square-footprint camera instead of circular `--window-m` radius
+  - Adopted DEM-style pixel-area `unseen_fraction` via `CoverageRaster`
+    instead of "fraction of in-window rocks not yet seen"
+  - New `--min-edge-diameter-m M` filter excludes rocks with circular-equivalent
+    diameter `d = 2·√(area/π)` below `M` metres from the graph edge set
+    (they remain as nodes; useful for suppressing imputed pebble edges)
+  - New `--fallback-diameter-m` / `--no-impute-missing-traits` controls over
+    the 2 cm circular-pebble imputation applied to rocks lacking a
+    `rock_traits_full.csv` row
+  - Animation filename pattern updated to
+    `bishop_rocks_steps{N}_alt{A}m_fov{F}deg_side{W}m_step{S}m_knn{K}_fps{F}_{ts}.{mp4,gif}`
+  - 26 unit tests in `tests/test_bishop_rocks_explorer.py` including a
+    `TestLegacyAPIsRemoved` guard that fails if the retired motion-policy
+    APIs re-appear, and `TestCoordDiameterAndSizeFilter` covering the new
+    diameter-based edge filter
 - **Fixed: Nyström large-mesh coefficient solve in `kernelcal.geo3d.large_mesh`**
   - Updated `compress_large_mesh_nystrom` to solve spectral coefficients with
     least-squares (`np.linalg.lstsq`) instead of the orthonormal projection

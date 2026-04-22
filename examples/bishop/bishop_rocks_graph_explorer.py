@@ -10,19 +10,44 @@ Inputs (expected under ``unprocessed/bishop-root/`` next to this script):
   - ``rock_traits_full.csv`` — lon, lat, area_m2, major_axis_m,
     minor_axis_m, eccentricity, orientation_deg, elevation_rel   ~14k rocks
 
-The explorer sweeps a circular window of radius ``--window-m`` over the traits
-bounding box. At every step it:
+Coord rocks without a matching row in ``rock_traits_full.csv`` are imputed as
+round 2 cm pebbles (``--fallback-diameter-m``; disable with
+``--no-impute-missing-traits``): ``diameter = 2 cm``, ``eccentricity = 0``,
+``area = π · 0.01² ≈ 3.14 × 10⁻⁴ m²``. After imputation every rock is
+edge-eligible.
+
+The explorer sweeps a **square** scan footprint over the traits bounding box,
+with side ``scan_side_m = 2 · altitude · tan(fov/2)`` derived from the shared
+:class:`kernelcal.graph_explorer.CameraModel` (same knobs as the drone-DEM
+explorer: ``--altitude-m``, ``--fov-deg``).  At every step it:
 
 1. Projects all lon/lat to a local equirectangular frame in **metres**.
-2. Collects the trait rocks inside the window.
-3. Builds a local **k-NN graph** where edges are added only between rocks that
-   have trait rows in ``rock_traits_full.csv``. Rocks without traits remain
-   isolated (no incident edges).
-4. Runs scipy's connected-components and the smallest Laplacian eigenvalue
+2. Paints the current footprint on a shared
+   :class:`kernelcal.graph_explorer.CoverageRaster` (bishop analog of the
+   DEM explorer's ``visited`` numpy array) at ``--scarp-resolution-m`` pixel
+   size, so ``unseen_frac`` at every future candidate uses the exact same
+   ``1 − mean(visited[target_patch])`` rule as the DEM explorer.
+3. Collects the trait rocks inside the square window (imputed pebbles
+   included).
+4. Builds a local **k-NN graph** where edges are added between rocks that
+   have trait rows in ``rock_traits_full.csv`` (with
+   ``--no-impute-missing-traits`` only the measured rocks are edge-eligible;
+   imputed 2 cm pebbles are treated the same as measured rocks and contribute
+   edges by default).  **This step is the only algorithmic difference from
+   the drone-DEM explorer** (which extracts a channel-network graph from a
+   DEM patch).
+5. Runs scipy's connected-components and the smallest Laplacian eigenvalue
    (Fiedler) on the k-NN graph.
-5. Scores candidate motion directions from local k-NN topology + exploration
-   bonus (unseen rocks) and moves toward the best candidate.
-6. Updates a live 2x3 matplotlib figure:
+6. Picks the next waypoint with the **quadrant-Betti** planner — identical
+   to ``choose_next_location`` in the drone-DEM explorer.  The current
+   window is split into four diagonal rock quadrants (NW/NE/SW/SE); each
+   quadrant's β₀/β₁ on its sub-k-NN graph are combined with an area-based
+   unseen fraction via the shared ``kernelcal.graph_explorer`` planner
+   (``w_beta1·clip(β₁/n) − w_beta0·clip(β₀/n) + w_unseen·unseen``, minus a
+   revisit penalty for recently-visited targets, with a deterministic
+   cyclic tie-break).  The explorer teleports to the outer corner of the
+   winner (same motion model as DEM's ``center = (target_r, target_c)``).
+7. Updates a live 2x3 matplotlib figure:
      (0,0) full map, rocks colored by area + window + path
      (0,1) local graph — nodes colored by component, cyan = k-NN edges
      (0,2) area histogram over rocks inside the window
@@ -30,14 +55,21 @@ bounding box. At every step it:
      (1,1) rolling trait stats (median area, median eccentricity)
      (1,2) cumulative explored: eccentricity vs area scatter, colored by step
 
-A summary PNG plus (optional) MP4 / GIF are written to ``--out``.
+A summary PNG is always written. By default the explorer also writes **both**
+MP4 and GIF animations into ``--out`` with auto-generated, timestamped
+filenames encoding the mission parameters (parity with
+``drone_dem_betti_adaptive_experiment.py``); pass ``--no-animation`` to skip
+that, or ``--save-mp4 PATH`` / ``--save-gif PATH`` to override the
+destination for that format.
 
 Usage
 -----
-    python3 bishop_rocks_graph_explorer.py                 # default scan
-    python3 bishop_rocks_graph_explorer.py --show          # interactive window
+    python3 bishop_rocks_graph_explorer.py                            # default scan + auto MP4/GIF
+    python3 bishop_rocks_graph_explorer.py --altitude-m 50 --fov-deg 90  # custom camera
+    python3 bishop_rocks_graph_explorer.py --show                     # interactive window
     python3 bishop_rocks_graph_explorer.py --steps 120 --knn 8
-    python3 bishop_rocks_graph_explorer.py --save-mp4 run.mp4
+    python3 bishop_rocks_graph_explorer.py --no-animation             # PNG+CSV only
+    python3 bishop_rocks_graph_explorer.py --save-mp4 run.mp4         # custom MP4 path
 """
 
 from __future__ import annotations
@@ -46,6 +78,7 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -56,7 +89,7 @@ from matplotlib import animation as mpl_animation
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
-from matplotlib.patches import Circle
+from matplotlib.patches import Rectangle
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import connected_components, laplacian
 from scipy.sparse.linalg import eigsh
@@ -74,6 +107,21 @@ sys.path.insert(0, str(REPO_ROOT))
 # that reach for ``bishop_rocks_graph_explorer.LocalFrame``.
 from kernelcal.geo3d import METERS_PER_DEG_LAT, LocalFrame  # noqa: F401
 
+# The exploration policy (scoring, revisit penalty, cyclic tie-break) is
+# identical to the one in ``examples/controller/drone_dem_betti_adaptive_experiment.py``
+# and now lives in ``kernelcal.graph_explorer`` so both scripts call the same
+# function.  The domain-specific work — splitting the scan window into four
+# diagonal rock quadrants — stays in this module; scoring / ranking does not.
+from kernelcal.graph_explorer import (
+    BettiWeights,
+    CameraModel,
+    Candidate,
+    CoverageRaster,
+    QUADRANT_NAMES,
+    QUADRANT_OFFSETS_METRIC,
+    choose_best_candidate,
+)
+
 HERE = Path(__file__).resolve().parent
 # Matches sibling scripts (``bishop_kernelcal.py``, ``bishop_trait_analysis.py``):
 # rock centroids + per-rock traits CSVs are expected under
@@ -88,9 +136,31 @@ DEFAULT_DATA_DIR = Path(
 DEFAULT_OUT_DIR = Path(
     os.environ.get(
         "KERNELCAL_BISHOP_FIG_DIR",
-        str(REPO_ROOT / "bishop_figures" / "rocks_explorer"),
+        "/home/jdas/Documents/kernelcal/video-demos/bishop",
     )
 )
+
+
+# ---------------------------------------------------------------------------
+# Fallback traits for rocks without measurements
+# ---------------------------------------------------------------------------
+# Coord rocks that have no matching row in ``rock_traits_full.csv`` are
+# imputed as perfectly round 2 cm pebbles:
+#   diameter      = 2 cm  = 0.02 m
+#   radius        = 0.01 m
+#   area_m2       = π · 0.01² ≈ 3.14 × 10⁻⁴ m²
+#   eccentricity  = 0  (circular — major_axis == minor_axis == 0.02 m)
+#   orientation   = 0°
+#   elevation_rel = NaN (unknown; not inferred from diameter)
+
+_FALLBACK_DIAMETER_M: float = 0.02
+_FALLBACK_ECCENTRICITY: float = 0.0
+
+
+def _circular_area_m2(diameter_m: float) -> float:
+    """Area of a circle with the given diameter in metres."""
+    r = 0.5 * float(diameter_m)
+    return float(np.pi * r * r)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +255,102 @@ def trait_mask_for_coords(
     return mask
 
 
+def impute_missing_traits(
+    coords: pd.DataFrame,
+    traits: pd.DataFrame,
+    *,
+    tol_m: float = 1.0,
+    diameter_m: float = _FALLBACK_DIAMETER_M,
+    eccentricity: float = _FALLBACK_ECCENTRICITY,
+) -> pd.DataFrame:
+    """Append synthetic trait rows for coord rocks that have no measured traits.
+
+    Each missing-trait rock is treated as a circular pebble with diameter
+    ``diameter_m`` (default 2 cm) and ``eccentricity`` (default 0), which
+    implies ``area_m2 = π · (diameter_m / 2)²``. The imputed rows inherit the
+    coord rock's ``lon``, ``lat``, and projected ``x_m`` / ``y_m`` so nearest-
+    neighbour matching marks every coord rock as trait-linked afterwards.
+
+    ``elevation_rel`` is set to NaN for imputed rocks because diameter carries
+    no information about elevation.
+
+    Returns a new DataFrame (``traits`` is not modified in place). If every
+    coord rock already has a matching trait within ``tol_m``, ``traits`` is
+    returned unchanged.
+    """
+    mask = trait_mask_for_coords(coords, traits, tol_m=float(tol_m))
+    missing = coords.loc[~mask]
+    if missing.empty:
+        return traits
+
+    n = int(len(missing))
+    area = _circular_area_m2(diameter_m)
+    imputed_cols: dict[str, np.ndarray] = {
+        "lon": missing["lon"].to_numpy(dtype=float),
+        "lat": missing["lat"].to_numpy(dtype=float),
+        "area_m2": np.full(n, area, dtype=float),
+        "major_axis_m": np.full(n, float(diameter_m), dtype=float),
+        "minor_axis_m": np.full(n, float(diameter_m), dtype=float),
+        "eccentricity": np.full(n, float(eccentricity), dtype=float),
+        "orientation_deg": np.zeros(n, dtype=float),
+        "elevation_rel": np.full(n, np.nan, dtype=float),
+    }
+    if "x_m" in missing.columns and "y_m" in missing.columns:
+        imputed_cols["x_m"] = missing["x_m"].to_numpy(dtype=float)
+        imputed_cols["y_m"] = missing["y_m"].to_numpy(dtype=float)
+    imputed = pd.DataFrame(imputed_cols)
+    # ``sort=False`` keeps the existing column order; missing columns in the
+    # original ``traits`` frame are added at the end and filled with NaN for
+    # pre-existing rows, which matches pandas' default concat behaviour.
+    return pd.concat([traits, imputed], ignore_index=True, sort=False)
+
+
+def coord_diameter_m_for_coords(
+    coords: pd.DataFrame,
+    traits: pd.DataFrame,
+    *,
+    tol_m: float = 1.0,
+) -> np.ndarray:
+    """Per-coord circular-equivalent diameter in metres.
+
+    For each coord rock, finds the nearest trait row within ``tol_m`` (in
+    projected metric ``x_m``/``y_m``) and returns its equivalent-circle
+    diameter ``d = 2·sqrt(area_m2 / π)``.  Returns ``NaN`` for coords with
+    no trait match inside the tolerance.
+
+    Used by the ``--min-edge-diameter-m`` CLI filter to drop small pebbles
+    from the k-NN edge set without removing them as nodes: the scan window
+    still counts them, they just don't wire into the graph topology.
+    """
+    n = len(coords)
+    if n == 0:
+        return np.empty((0,), dtype=float)
+    out = np.full((n,), np.nan, dtype=float)
+    if (
+        len(traits) == 0
+        or "area_m2" not in traits.columns
+        or not {"x_m", "y_m"}.issubset(coords.columns)
+        or not {"x_m", "y_m"}.issubset(traits.columns)
+    ):
+        return out
+    cxy = np.c_[coords["x_m"].to_numpy(dtype=float),
+                coords["y_m"].to_numpy(dtype=float)]
+    txy = np.c_[traits["x_m"].to_numpy(dtype=float),
+                traits["y_m"].to_numpy(dtype=float)]
+    tree = cKDTree(txy)
+    d, idx = tree.query(cxy, k=1)
+    areas = traits["area_m2"].to_numpy(dtype=float)
+    good = (
+        np.isfinite(d)
+        & (d <= float(tol_m))
+        & np.isfinite(areas[idx])
+        & (areas[idx] > 0.0)
+    )
+    if np.any(good):
+        out[good] = 2.0 * np.sqrt(areas[idx[good]] / np.pi)
+    return out
+
+
 def knn_edges_trait_only(xy: np.ndarray, k: int, has_trait: np.ndarray) -> set[tuple[int, int]]:
     """k-NN edges between nodes with traits only; others stay isolated."""
     n = int(len(xy))
@@ -236,94 +402,151 @@ def fiedler_value(A: csr_matrix) -> float:
     return float(vals[1]) if len(vals) > 1 else float(vals[0])
 
 
-def fiedler_value_and_ipr(A: csr_matrix) -> tuple[float, float]:
-    """Return (lambda2, IPR of Fiedler mode) for an undirected graph."""
-    n = A.shape[0]
-    if n < 3 or A.nnz == 0:
-        return 0.0, 0.0
-    L = laplacian(A, normed=False).astype(float)
-    k = min(3, n - 1)
-    try:
-        vals, vecs = eigsh(L, k=k, which="SM", return_eigenvectors=True)
-    except Exception:
-        # Fall back to value-only path if eigenvectors are numerically unstable.
-        return fiedler_value(A), 0.0
-    vals = np.real(vals)
-    vecs = np.real(vecs)
-    order = np.argsort(vals)
-    vals = vals[order]
-    vecs = vecs[:, order]
-    lam2 = float(vals[1]) if len(vals) > 1 else float(vals[0])
-    if vecs.shape[1] <= 1:
-        return lam2, 0.0
-    v2 = vecs[:, 1]
-    denom = float(np.sum(v2 * v2))
-    if denom <= 1e-12:
-        return lam2, 0.0
-    ipr = float(np.sum(v2**4) / (denom * denom))
-    return lam2, ipr
-
-
 # ---------------------------------------------------------------------------
-# Scan path (spiral)
+# Quadrant-Betti candidate builder
 # ---------------------------------------------------------------------------
 
 
-def spiral_path(xmin: float, xmax: float, ymin: float, ymax: float,
-                step: float, n_steps: int) -> np.ndarray:
-    """Rectangular spiral starting from the centre, spacing ~ ``step`` metres."""
-    cx = 0.5 * (xmin + xmax)
-    cy = 0.5 * (ymin + ymax)
-    xs = [cx]; ys = [cy]
-    dx, dy = step, 0.0
-    leg_len = 1
-    direction = 0
-    while len(xs) < n_steps:
-        for _ in range(2):
-            for _ in range(leg_len):
-                if len(xs) >= n_steps:
-                    break
-                xs.append(xs[-1] + dx); ys.append(ys[-1] + dy)
-            # rotate 90° CCW
-            dx, dy = -dy, dx
-            direction = (direction + 1) % 4
-        leg_len += 1
-    pts = np.asarray([xs, ys], dtype=float).T
-    # Clamp to bbox so we don't spiral off the scarp
-    pts[:, 0] = np.clip(pts[:, 0], xmin, xmax)
-    pts[:, 1] = np.clip(pts[:, 1], ymin, ymax)
-    return pts[:n_steps]
+def _square_window_mask(
+    coord_xy: np.ndarray, cx: float, cy: float, side_m: float
+) -> np.ndarray:
+    """Bool mask of rocks inside the ``side_m × side_m`` square at ``(cx, cy)``.
+
+    Square footprint semantics mirror the drone-DEM explorer's
+    ``capture_square`` which uses ``[r0:r1, c0:c1]`` slicing; a rock is
+    inside iff ``|x - cx| <= side/2`` AND ``|y - cy| <= side/2``.  The
+    half-open upper edge (``<``) is not important here because float
+    coordinates almost never land exactly on the boundary.
+    """
+    half = 0.5 * float(side_m)
+    dx = coord_xy[:, 0] - float(cx)
+    dy = coord_xy[:, 1] - float(cy)
+    return (np.abs(dx) <= half) & (np.abs(dy) <= half)
 
 
-# ---------------------------------------------------------------------------
-# Directional candidate planner (non-quadrant)
-# ---------------------------------------------------------------------------
+def build_betti_quadrant_candidates(
+    cx: float,
+    cy: float,
+    scan_side_m: float,
+    step_m: float,
+    *,
+    coord_xy: np.ndarray,
+    coord_has_trait: np.ndarray,
+    knn: int,
+    visited_raster: CoverageRaster | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+) -> list[Candidate]:
+    """Build 4 quadrant candidates for the shared Betti scorer.
 
+    Mirrors the quadrant split in ``choose_next_location`` of the drone-DEM
+    explorer (``examples/controller/drone_dem_betti_adaptive_experiment.py``):
+    split the current square scan footprint of side ``scan_side_m`` into
+    four diagonal sub-quadrants (NW/NE/SW/SE) around ``(cx, cy)``, compute
+    each quadrant's k-NN graph Betti numbers ``(β₀, β₁, n_nodes)``, and
+    target the outer corner of that quadrant in metric space (``step_m``
+    in each diagonal axis).
 
-MOVE_DIRS: tuple[tuple[str, tuple[float, float]], ...] = (
-    ("E",  ( 1.0,  0.0)),
-    ("NE", ( 1.0,  1.0)),
-    ("N",  ( 0.0,  1.0)),
-    ("NW", (-1.0,  1.0)),
-    ("W",  (-1.0,  0.0)),
-    ("SW", (-1.0, -1.0)),
-    ("S",  ( 0.0, -1.0)),
-    ("SE", ( 1.0, -1.0)),
-    ("STAY", (0.0, 0.0)),
-)
+    ``coord_has_trait`` is the edge-eligibility mask (see
+    :func:`knn_edges_trait_only`).  ``visited_raster`` is the shared
+    coverage mask; if provided, ``unseen_frac`` is computed at each
+    candidate target with the exact same
+    ``1 - mean(visited[target_patch])`` rule as the drone-DEM explorer's
+    ``visited[tr0:tr1, tc0:tc1]`` (see
+    :meth:`~kernelcal.graph_explorer.CoverageRaster.unseen_fraction_at`).
+    When not provided the unseen fraction is set to ``1.0`` (fully
+    unexplored).
 
-# Anti "race-around" defaults (kept internal to keep CLI simple).
-_BACKTRACK_PENALTY = 0.75
-_BACKTRACK_COS_THRESHOLD = -0.8
-_LOOP_RETURN_PENALTY = 1.0
-_LOOP_RETURN_RADIUS_FRACTION = 0.4  # of step_m
+    ``bbox`` = ``(xmin, xmax, ymin, ymax)`` clamps the candidate target
+    positions; defaults to no clamping.
+    """
+    # Rocks inside the current square window — shared across all 4 quadrants.
+    in_sq = _square_window_mask(coord_xy, cx, cy, scan_side_m)
+    if not np.any(in_sq):
+        return []
+    win_xy = coord_xy[in_sq]
+    win_has_trait = coord_has_trait[in_sq]
+    # Quadrant membership in the current window: sign of relative position.
+    rel = win_xy - np.asarray([[cx, cy]], dtype=float)
+    # Rocks exactly on an axis (rel == 0) default to the positive half so
+    # every rock lands in exactly one quadrant.  Matches the DEM slicing
+    # convention where the lower-right corner of NW goes to NE / SE via
+    # ``slice(hr, h)`` / ``slice(wc, w)``.
+    east = rel[:, 0] >= 0.0
+    north = rel[:, 1] >= 0.0
 
+    quad_masks: dict[str, np.ndarray] = {
+        "NW": (~east) & north,
+        "NE": east & north,
+        "SW": (~east) & (~north),
+        "SE": east & (~north),
+    }
 
-def _normalize(vx: float, vy: float) -> tuple[float, float]:
-    n = float(np.hypot(vx, vy))
-    if n <= 1e-9:
-        return 0.0, 0.0
-    return vx / n, vy / n
+    if bbox is not None:
+        xmin, xmax, ymin, ymax = (float(b) for b in bbox)
+    else:
+        xmin = xmax = ymin = ymax = float("nan")
+
+    candidates: list[Candidate] = []
+    for name in QUADRANT_NAMES:
+        q_mask = quad_masks[name]
+        n_q = int(np.count_nonzero(q_mask))
+        if n_q == 0:
+            continue
+        q_xy = win_xy[q_mask]
+        q_has_trait = win_has_trait[q_mask]
+
+        # k-NN graph on the quadrant's rocks; edges only between trait-having
+        # rocks (same rule as the main window graph).
+        q_edges = (
+            knn_edges_trait_only(q_xy, int(knn), q_has_trait)
+            if n_q >= 2 else set()
+        )
+        q_A = adjacency_from_edges(max(n_q, 1), q_edges)
+        if q_A.nnz > 0:
+            n_comp, _ = connected_components(q_A, directed=False)
+        else:
+            n_comp = n_q  # all-isolated
+        beta1 = max(0, int(q_A.nnz // 2) - n_q + int(n_comp))
+
+        # Target = outer corner of this quadrant in metric space.
+        dx, dy = QUADRANT_OFFSETS_METRIC[name]
+        tx = cx + float(step_m) * float(dx)
+        ty = cy + float(step_m) * float(dy)
+        if bbox is not None:
+            tx = float(np.clip(tx, xmin, xmax))
+            ty = float(np.clip(ty, ymin, ymax))
+
+        # Unseen fraction = fraction of the target footprint's ground area
+        # not yet covered by any past scan.  Semantically identical to the
+        # drone-DEM explorer's
+        # ``1 - mean(visited_mask[tr0:tr1, tc0:tc1])`` — the
+        # :class:`CoverageRaster` is the bishop analog of DEM's numpy
+        # ``visited`` array.  Callers that pass ``visited_raster=None``
+        # get ``unseen = 1.0`` (treat everything as unexplored).
+        if visited_raster is not None:
+            unseen = float(
+                visited_raster.unseen_fraction_at(tx, ty, float(scan_side_m))
+            )
+        else:
+            unseen = 1.0
+
+        # Position key for the revisit-penalty equality check.  Rounded to
+        # 1 cm so tiny float drift between consecutive visits doesn't hide
+        # a true revisit.  Must match the grid used by the caller when it
+        # records past centers against ``recent_positions`` — see the
+        # betti-quadrant branch in ``run()``.
+        pos_key = (round(tx, 2), round(ty, 2))
+        candidates.append(Candidate(
+            name=name,
+            position=pos_key,
+            beta0=int(n_comp),
+            beta1=int(beta1),
+            n_nodes=int(n_q),
+            unseen_frac=float(unseen),
+            extra={"target_xy": (float(tx), float(ty))},
+        ))
+    return candidates
+
 
 # ---------------------------------------------------------------------------
 # Explorer
@@ -342,14 +565,106 @@ class StepRecord:
     fiedler: float        # λ₂
     median_area: float
     median_ecc: float
-    chosen_direction: str
+    chosen_direction: str  # winning quadrant name: NW / NE / SW / SE
     chosen_score: float
+
+
+# ---------------------------------------------------------------------------
+# Animation helpers (ported from examples/controller/drone_dem_betti_adaptive_experiment.py)
+# ---------------------------------------------------------------------------
+
+
+def _build_animation_base_name(
+    args: argparse.Namespace, step_m: float, scan_side_m: float
+) -> str:
+    """Auto-generated animation stem mirroring the DEM explorer's convention.
+
+    Pattern:
+    ``bishop_rocks_steps{N}_alt{A}m_fov{F}deg_side{W}m_step{S}m_knn{K}_fps{F}_{YYYYMMDD_HHMMSS}``.
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return (
+        f"bishop_rocks_steps{int(args.steps)}"
+        f"_alt{args.altitude_m:g}m_fov{args.fov_deg:g}deg"
+        f"_side{scan_side_m:g}m_step{step_m:g}m"
+        f"_knn{int(args.knn)}"
+        f"_fps{max(1, int(args.fps))}_{ts}"
+    )
+
+
+def _save_animation_mp4_and_gif(
+    ani: mpl_animation.FuncAnimation,
+    out_dir: Path,
+    base_name: str,
+    fps: int,
+    *,
+    mp4_override: Path | None = None,
+    gif_override: Path | None = None,
+    dpi: int = 120,
+) -> tuple[Path, Path]:
+    """Write both MP4 and GIF from one animation, with post-write validation.
+
+    Ported from ``save_animation`` in
+    ``examples/controller/drone_dem_betti_adaptive_experiment.py``: both
+    formats are always produced from the same ``FuncAnimation`` object, each
+    file is checked for existence and non-zero size, and any failure is
+    re-raised as ``RuntimeError`` with both expected paths in the message so
+    callers can surface a clear diagnostic.
+
+    ``mp4_override`` / ``gif_override`` (when set) replace the auto-generated
+    path for that format; they still produce *both* outputs.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    mp4_path = (
+        Path(mp4_override).resolve() if mp4_override else (out_dir / f"{base_name}.mp4").resolve()
+    )
+    gif_path = (
+        Path(gif_override).resolve() if gif_override else (out_dir / f"{base_name}.gif").resolve()
+    )
+    mp4_path.parent.mkdir(parents=True, exist_ok=True)
+    gif_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        mp4_writer = mpl_animation.FFMpegWriter(fps=max(1, int(fps)))
+        ani.save(str(mp4_path), writer=mp4_writer, dpi=dpi)
+        if not (mp4_path.exists() and mp4_path.stat().st_size > 0):
+            raise RuntimeError(f"MP4 writer completed but file is empty: {mp4_path}")
+
+        gif_writer = mpl_animation.PillowWriter(fps=max(1, int(fps)))
+        ani.save(str(gif_path), writer=gif_writer, dpi=dpi)
+        if not (gif_path.exists() and gif_path.stat().st_size > 0):
+            raise RuntimeError(f"GIF writer completed but file is empty: {gif_path}")
+        return mp4_path, gif_path
+    except Exception as export_err:
+        raise RuntimeError(
+            "Failed to create required animation outputs (MP4 + GIF). "
+            f"Expected files: {mp4_path} and {gif_path}"
+        ) from export_err
 
 
 def run(args: argparse.Namespace) -> None:
     coords, traits, _frame = load(args.data_dir)
     print(f"coords CSV : {len(coords):>7,} rocks")
     print(f"traits CSV : {len(traits):>7,} rocks, columns={list(traits.columns)}")
+
+    if not args.no_impute_missing_traits:
+        n_before = len(traits)
+        traits = impute_missing_traits(
+            coords, traits,
+            tol_m=float(args.trait_match_tol_m),
+            diameter_m=float(args.fallback_diameter_m),
+            eccentricity=_FALLBACK_ECCENTRICITY,
+        )
+        n_imputed = len(traits) - n_before
+        if n_imputed > 0:
+            imp_area = _circular_area_m2(args.fallback_diameter_m)
+            print(
+                f"imputed    : {n_imputed:>7,} rocks as circular "
+                f"{args.fallback_diameter_m * 100.0:.1f} cm pebbles "
+                f"(area={imp_area:.3e} m², ecc={_FALLBACK_ECCENTRICITY:g})"
+            )
+        else:
+            print("imputed    :       0 rocks (every coord rock already has a trait row)")
 
     tx = traits["x_m"].to_numpy()
     ty = traits["y_m"].to_numpy()
@@ -365,32 +680,90 @@ def run(args: argparse.Namespace) -> None:
           f"y {ymin:.1f} .. {ymax:.1f} m   "
           f"(Δx={xmax-xmin:.0f}m, Δy={ymax-ymin:.0f}m)")
 
-    step_m = args.step_m if args.step_m > 0 else 0.6 * args.window_m
-    rng = np.random.default_rng(args.decision_noise_seed)
-    loop_return_radius_m = _LOOP_RETURN_RADIUS_FRACTION * float(step_m)
-    if args.motion_policy == "spiral":
-        spiral_pts = spiral_path(xmin, xmax, ymin, ymax, step=step_m, n_steps=args.steps)
-    else:
-        spiral_pts = None
+    # Camera model (shared with drone-DEM explorer).  ``scan_side_m`` is
+    # the edge of the square nadir footprint: rocks are considered "in
+    # the scan window" iff both |x - cx| and |y - cy| are within
+    # ``scan_side_m / 2``, matching the DEM's ``capture_square`` slicing.
+    cam = CameraModel(
+        altitude_m=float(args.altitude_m),
+        fov_deg=float(args.fov_deg),
+        resolution_m=float(args.scarp_resolution_m),
+    )
+    scan_side_m = float(cam.footprint_side_m)
+    scan_half_m = 0.5 * scan_side_m
 
-    trait_tree = cKDTree(np.c_[tx, ty])
-    # All coord rocks are candidate nodes; only nodes with trait rows can
-    # receive k-NN edges.
-    coord_tree = cKDTree(np.c_[cx_bg, cy_bg])
-    coord_has_trait = trait_mask_for_coords(coords, traits)
-    print(
-        f"trait-linked coord rocks: {int(np.count_nonzero(coord_has_trait)):,} / {len(coords):,} "
-        "(only these are edge-eligible)"
+    # Bishop analog of the drone-DEM ``visited = np.zeros_like(dem, bool)``.
+    # A single coverage raster over the traits bbox (plus a one-pixel pad
+    # on each side) lets us compute ``unseen = 1 - mean(visited[target])``
+    # at any future candidate position via the shared ``CoverageRaster``.
+    raster_pad = float(args.scarp_resolution_m)
+    visited_raster = CoverageRaster(
+        bbox=(xmin - raster_pad, xmax + raster_pad,
+              ymin - raster_pad, ymax + raster_pad),
+        resolution_m=float(args.scarp_resolution_m),
     )
 
-    # Path is built online (the adaptive planner chooses next center from
-    # candidate move directions scored on local k-NN topology).
+    # Step = scan_side_m / 2 per axis (matches DEM's ``half = side_px // 2``
+    # diagonal step exactly).
+    step_m = args.step_m if args.step_m > 0 else 0.5 * scan_side_m
+    mission_params_line = (
+        f"mission: steps={args.steps} | "
+        f"alt={args.altitude_m:g}m | fov={args.fov_deg:g}deg | "
+        f"scan_side={scan_side_m:g}m | step_m={step_m:g} | "
+        f"raster={args.scarp_resolution_m:g}m/px "
+        f"({visited_raster.shape[0]}x{visited_raster.shape[1]}) | "
+        f"knn={args.knn} | fps={args.fps}"
+    )
+
+    # All coord rocks are candidate nodes; only nodes with trait rows
+    # (and ≥ ``--min-edge-diameter-m``) can receive k-NN edges.  Scan
+    # window membership uses a square bbox test (see ``_square_window_mask``).
+    coord_xy_stack = np.c_[cx_bg, cy_bg]
+    trait_xy_stack = np.c_[tx, ty]
+    coord_has_trait = trait_mask_for_coords(coords, traits)
+    n_linked = int(np.count_nonzero(coord_has_trait))
+    edge_note = (
+        "(all edge-eligible)"
+        if n_linked == len(coords)
+        else "(only these are edge-eligible)"
+    )
+    print(
+        f"trait-linked coord rocks: {n_linked:,} / {len(coords):,} {edge_note}"
+    )
+
+    # Optional size filter: rocks whose circular-equivalent diameter is
+    # smaller than ``--min-edge-diameter-m`` are kept as nodes (they still
+    # count inside the scan window and against β₀/n) but excluded from the
+    # k-NN edge set.  Matches the common field-geology question "how does
+    # the graph change if we ignore sub-cm pebbles?" without having to
+    # re-run imputation with a different fallback diameter.
+    min_edge_d = float(args.min_edge_diameter_m)
+    if min_edge_d > 0.0:
+        coord_diameter_m = coord_diameter_m_for_coords(
+            coords, traits, tol_m=float(args.trait_match_tol_m)
+        )
+        size_eligible = np.where(
+            np.isfinite(coord_diameter_m),
+            coord_diameter_m >= min_edge_d,
+            False,
+        )
+        coord_edge_eligible = coord_has_trait & size_eligible
+        n_dropped = int(np.count_nonzero(coord_has_trait & ~size_eligible))
+        n_eligible = int(np.count_nonzero(coord_edge_eligible))
+        print(
+            f"min-edge-diameter : {min_edge_d * 100.0:.2f} cm -> "
+            f"{n_dropped:,} rocks excluded from edges "
+            f"(edge-eligible: {n_eligible:,} / {len(coords):,})"
+        )
+    else:
+        coord_edge_eligible = coord_has_trait
+
+    # Path is built online (the quadrant-Betti planner chooses the next
+    # centre from the 4 diagonal rock quadrants).
     path_xy: list[tuple[float, float]] = []
     seed_xy = (
-        float(spiral_pts[0, 0]) if spiral_pts is not None else
-        (float(args.seed_x) if args.seed_x is not None else 0.5 * (xmin + xmax)),
-        float(spiral_pts[0, 1]) if spiral_pts is not None else
-        (float(args.seed_y) if args.seed_y is not None else 0.5 * (ymin + ymax)),
+        float(args.seed_x) if args.seed_x is not None else 0.5 * (xmin + xmax),
+        float(args.seed_y) if args.seed_y is not None else 0.5 * (ymin + ymax),
     )
 
     # ------------------------------------------------------------------
@@ -435,8 +808,13 @@ def run(args: argparse.Namespace) -> None:
         linewidths=0, alpha=0.85,
     )
     fig.colorbar(sc_all, ax=ax00, shrink=0.8, pad=0.02, label=color_label)
-    window = Circle(seed_xy, args.window_m,
-                    ec="crimson", fc="none", lw=1.6, alpha=0.9)
+    # Scan footprint artist: matches the DEM explorer's square ``fov_rect``.
+    # ``xy`` is the lower-left corner in data coords.
+    window = Rectangle(
+        xy=(seed_xy[0] - scan_half_m, seed_xy[1] - scan_half_m),
+        width=scan_side_m, height=scan_side_m,
+        ec="crimson", fc="none", lw=1.6, alpha=0.9,
+    )
     ax00.add_patch(window)
     path_line, = ax00.plot([], [], "-", color="crimson", lw=0.8, alpha=0.8)
     # Yellow arrow showing chosen next direction.
@@ -453,7 +831,10 @@ def run(args: argparse.Namespace) -> None:
     ax01.set_aspect("equal")
     ax01.set_xlabel("x (m, local)")
     ax01.set_ylabel("y (m, local)")
-    ax01.set_title(f"Local k-NN graph — all rocks (r={args.window_m} m)")
+    ax01.set_title(
+        f"Local k-NN graph — all rocks "
+        f"(square {scan_side_m:g} × {scan_side_m:g} m)"
+    )
     ax01.grid(alpha=0.3)
     lc_knn = LineCollection([], colors="cyan", linewidths=1.0, alpha=0.9)
     ax01.add_collection(lc_knn)
@@ -476,7 +857,9 @@ def run(args: argparse.Namespace) -> None:
     ax02.set_ylabel("count")
     ax02.set_yscale("log")
     ax02.grid(alpha=0.3)
-    hist_bins = np.geomspace(max(area.min(), 0.01), area.max(), 40)
+    # Floor chosen so imputed 2 cm pebbles (~3.14×10⁻⁴ m²) fall inside the
+    # geomspace range rather than being silently clipped out of the histogram.
+    hist_bins = np.geomspace(max(float(np.nanmin(area)), 1e-6), float(np.nanmax(area)), 40)
     (hist_bar,) = ax02.plot([], [], drawstyle="steps-mid", color="steelblue", lw=1.2)
 
     # (1,0) topology history
@@ -512,7 +895,6 @@ def run(args: argparse.Namespace) -> None:
     records: list[StepRecord] = []
     seen_nodes: set[int] = set()         # coord indices — all rocks seen so far
     seen_trait_nodes: set[int] = set()   # trait indices — for cumulative scatter
-    metric_history: list[np.ndarray] = []   # spectral/topological vectors for novelty
     next_center: list[tuple[float, float]] = [seed_xy]  # mutable across frames
 
     # Update ax10 (topology history) to include β₁.
@@ -520,23 +902,38 @@ def run(args: argparse.Namespace) -> None:
     ax10.legend(loc="upper left", fontsize=8)
 
     def update_step(step: int) -> Iterable:
-        # Spiral planner overrides online choice.
-        if spiral_pts is not None:
-            cx, cy = float(spiral_pts[step, 0]), float(spiral_pts[step, 1])
-        else:
-            cx, cy = next_center[0]
+        # Frame-0 reset makes update_step idempotent across repeated
+        # FuncAnimation passes (needed to save MP4 and GIF from the same
+        # animation object without corrupting cumulative sim state).
+        if int(step) == 0:
+            records.clear()
+            path_xy.clear()
+            seen_nodes.clear()
+            seen_trait_nodes.clear()
+            next_center[0] = seed_xy
+
+        cx, cy = next_center[0]
         path_xy_snapshot = path_xy + [(cx, cy)]
 
-        # Graph built over ALL coord rocks inside the window.
-        coord_idx = np.asarray(coord_tree.query_ball_point((cx, cy), r=args.window_m), dtype=int)
-        n_local = len(coord_idx)
+        # Square scan footprint (matches DEM's ``capture_square``).  A rock
+        # is inside iff both |x - cx| and |y - cy| are within scan_half_m.
+        coord_in_sq = _square_window_mask(coord_xy_stack, cx, cy, scan_side_m)
+        coord_idx = np.nonzero(coord_in_sq)[0]
+        n_local = int(coord_idx.size)
         local_xy = np.c_[cx_bg[coord_idx], cy_bg[coord_idx]] if n_local else np.empty((0, 2))
 
-        # Trait rocks inside the window — for stats / histogram only.
-        trait_idx = np.asarray(trait_tree.query_ball_point((cx, cy), r=args.window_m), dtype=int)
-        n_traits_local = len(trait_idx)
+        # Trait rocks inside the same square window — for stats / histogram.
+        trait_in_sq = _square_window_mask(trait_xy_stack, cx, cy, scan_side_m)
+        trait_idx = np.nonzero(trait_in_sq)[0]
+        n_traits_local = int(trait_idx.size)
 
-        local_has_trait = coord_has_trait[coord_idx] if n_local else np.empty((0,), dtype=bool)
+        # Paint the visited raster *now*, before scoring the candidates, so
+        # the current footprint counts toward the unseen fraction at every
+        # future target.  Matches the DEM explorer which writes
+        # ``visited[r0:r1, c0:c1] = True`` after each capture.
+        visited_raster.mark_square(cx, cy, scan_side_m)
+
+        local_has_trait = coord_edge_eligible[coord_idx] if n_local else np.empty((0,), dtype=bool)
         if n_local >= 2:
             e_knn = knn_edges_trait_only(local_xy, args.knn, local_has_trait)
         else:
@@ -553,116 +950,62 @@ def run(args: argparse.Namespace) -> None:
         n_edges_full = int(A_knn.nnz // 2)
         beta1_full = max(0, n_edges_full - n_local + int(n_comp))
 
-        # ---- non-quadrant move selection from directional candidates -------
-        prev_dir_vec = (0.0, 0.0)
-        if len(records) >= 1:
-            prev_rec = records[-1]
-            vx = cx - prev_rec.cx
-            vy = cy - prev_rec.cy
-            prev_dir_vec = _normalize(vx, vy)
+        # ---- move selection (quadrant-Betti, shared with DEM) -------------
+        # Split the current window into 4 diagonal rock quadrants, score
+        # each by Betti topology + area-based unseen fraction, and move to
+        # the outer corner of the winner.  Scoring, revisit penalty, and
+        # cyclic tie-break all live in ``kernelcal.graph_explorer`` so this
+        # script and the DEM explorer stay in lock-step.
+        q_cands = build_betti_quadrant_candidates(
+            cx, cy,
+            scan_side_m=scan_side_m,
+            step_m=float(step_m),
+            coord_xy=coord_xy_stack,
+            coord_has_trait=coord_edge_eligible,
+            knn=int(args.knn),
+            visited_raster=visited_raster,
+            bbox=(xmin, xmax, ymin, ymax),
+        )
+        weights = BettiWeights(
+            w_beta1=float(args.w_beta1),
+            w_beta0=float(args.w_beta0),
+            w_unseen=float(args.w_unseen),
+            revisit_penalty=float(args.revisit_penalty),
+        )
+        # Past visit centres keyed the same way as each candidate's
+        # ``position`` (rounded to 1 cm) so the revisit penalty fires on a
+        # genuine revisit of a prior target.
+        recent_pos = (
+            [(round(r.cx, 2), round(r.cy, 2)) for r in records[-20:]]
+            if records else []
+        )
+        best_cand, best_score_q, _scored_q = choose_best_candidate(
+            q_cands, weights,
+            recent_positions=recent_pos,
+            tie_break_index=len(records),
+        )
 
-        best_name = "STAY"
-        best_score = -np.inf
-        best_dir = (0.0, 0.0)
-        seen_arr = np.fromiter(seen_nodes, dtype=int) if seen_nodes else np.empty((0,), dtype=int)
-        best_metric_vec = np.zeros(4, dtype=float)
-        scored_candidates: list[tuple[float, str, tuple[float, float], np.ndarray]] = []
-        for name, (dx, dy) in MOVE_DIRS:
-            cand_x = float(np.clip(cx + step_m * dx, xmin, xmax))
-            cand_y = float(np.clip(cy + step_m * dy, ymin, ymax))
-            cand_idx = np.asarray(coord_tree.query_ball_point((cand_x, cand_y), r=args.window_m), dtype=int)
-            n_cand = int(len(cand_idx))
-            if n_cand == 0:
-                continue
-            else:
-                cand_xy = np.c_[cx_bg[cand_idx], cy_bg[cand_idx]]
-                cand_has_trait = coord_has_trait[cand_idx] if n_cand else np.empty((0,), dtype=bool)
-                cand_edges = (
-                    knn_edges_trait_only(cand_xy, args.knn, cand_has_trait)
-                    if n_cand >= 2 else set()
-                )
-                cand_A = adjacency_from_edges(max(n_cand, 1), cand_edges)
-                if n_cand > 0 and cand_A.nnz > 0:
-                    cand_beta0, _ = connected_components(cand_A, directed=False)
-                else:
-                    cand_beta0 = n_cand
-                cand_fied, cand_ipr = fiedler_value_and_ipr(cand_A) if n_cand >= 3 else (0.0, 0.0)
-                cand_beta1 = max(0, int(cand_A.nnz // 2) - n_cand + int(cand_beta0))
-                n_new = int(np.count_nonzero(~np.isin(cand_idx, seen_arr))) if seen_arr.size else n_cand
-                if args.motion_policy == "spectral-leaf":
-                    beta0_norm = float(cand_beta0) / max(1.0, float(n_cand))
-                    beta1_norm = float(cand_beta1) / max(1.0, float(n_cand))
-                    leafness = 1.0 - float(np.clip(beta1_norm, 0.0, 1.0))
-                    lambda_inv = min(50.0, 1.0 / (1e-6 + max(0.0, float(cand_fied))))
-                    unseen_frac = float(n_new) / max(1.0, float(n_cand))
-                    metric_vec = np.array([beta0_norm, beta1_norm, float(cand_fied), float(cand_ipr)], dtype=float)
-                    novelty = 0.0
-                    if metric_history:
-                        hist = np.vstack(metric_history)
-                        novelty = float(np.min(np.linalg.norm(hist - metric_vec[None, :], axis=1)))
-                    score = (
-                        args.w_lambda_inv * lambda_inv
-                        + args.w_beta1_tree * leafness
-                        + args.w_beta0_spectral * beta0_norm
-                        + args.w_ipr * float(cand_ipr)
-                        + args.w_novelty * novelty
-                        + args.w_unseen * unseen_frac
-                    )
-                else:
-                    beta0_norm = float(cand_beta0) / max(1.0, float(n_cand))
-                    beta1_norm = float(cand_beta1) / max(1.0, float(n_cand))
-                    unseen_frac = float(n_new) / max(1.0, float(n_cand))
-                    metric_vec = np.array([float(cand_beta0), float(cand_beta1),
-                                           float(cand_fied), float(n_new)], dtype=float)
-                    score = (
-                        args.w_beta1 * beta1_norm
-                        + args.w_fiedler * float(cand_fied)
-                        - args.w_beta0 * beta0_norm
-                        + args.w_unseen * unseen_frac
-                    )
-                if name == "STAY":
-                    score -= 0.5 * max(1.0, args.w_unseen)
-                mv = _normalize(dx, dy)
-                if mv != (0.0, 0.0):
-                    score += args.w_momentum * (mv[0] * prev_dir_vec[0] + mv[1] * prev_dir_vec[1])
-
-                # Anti "race-around" guards:
-                # 1) penalize immediate backtracking (direction reversal),
-                # 2) penalize tight two-step loops (A->B->A-style returns).
-                if len(records) >= 1 and mv != (0.0, 0.0):
-                    prev_mv = _normalize(cx - records[-1].cx, cy - records[-1].cy)
-                    if prev_mv != (0.0, 0.0):
-                        cosang = mv[0] * prev_mv[0] + mv[1] * prev_mv[1]
-                        if cosang <= _BACKTRACK_COS_THRESHOLD:
-                            score -= _BACKTRACK_PENALTY
-                if len(records) >= 2:
-                    dist_2back = float(np.hypot(cand_x - records[-2].cx, cand_y - records[-2].cy))
-                    if dist_2back <= loop_return_radius_m:
-                        score -= _LOOP_RETURN_PENALTY
-
-                # Optional stochastic exploration: small Gaussian perturbation
-                # to break deterministic lock-in under near-tied scores.
-                if float(args.decision_noise_sigma) > 0.0:
-                    score += float(rng.normal(0.0, float(args.decision_noise_sigma)))
-                scored_candidates.append((float(score), name, (dx, dy), metric_vec))
-
-        if scored_candidates:
-            best_score = max(s for s, *_ in scored_candidates)
-            eps = 1e-6 * max(1.0, abs(best_score))
-            tied = [cand for cand in scored_candidates if abs(cand[0] - best_score) <= eps]
-            chosen = tied[len(records) % len(tied)]
-            _, best_name, best_dir, best_metric_vec = chosen
-
-        # if all candidates are poor (empty neighborhoods), drift toward bbox center
-        if not np.isfinite(best_score):
+        if best_cand is not None:
+            best_name = best_cand.name
+            best_score = float(best_score_q)
+            target_xy = (
+                float(best_cand.extra["target_xy"][0]),
+                float(best_cand.extra["target_xy"][1]),
+            )
+            new_cx = float(np.clip(target_xy[0], xmin, xmax))
+            new_cy = float(np.clip(target_xy[1], ymin, ymax))
+        else:
+            # Empty window: drift one step toward the bbox centre so we
+            # escape voids instead of stalling.  Matches DEM's bbox-clamp
+            # fallback when the candidate list is empty.
+            best_name = "STAY"
+            best_score = 0.0
             tgt = np.array([0.5 * (xmin + xmax), 0.5 * (ymin + ymax)])
             vec = tgt - np.array([cx, cy])
             nrm = float(np.linalg.norm(vec))
             dirv = (vec / nrm) if nrm > 1e-6 else np.array([1.0, 0.0])
-        else:
-            dirv = np.array(_normalize(best_dir[0], best_dir[1]))
-        new_cx = float(np.clip(cx + step_m * dirv[0], xmin, xmax))
-        new_cy = float(np.clip(cy + step_m * dirv[1], ymin, ymax))
+            new_cx = float(np.clip(cx + step_m * dirv[0], xmin, xmax))
+            new_cy = float(np.clip(cy + step_m * dirv[1], ymin, ymax))
         next_center[0] = (new_cx, new_cy)
 
         med_area = float(np.median(area[trait_idx])) if n_traits_local else float("nan")
@@ -684,29 +1027,24 @@ def run(args: argparse.Namespace) -> None:
             records[-1] = rec          # FuncAnimation can call frame 0 twice
         else:
             records.append(rec)
-            # Track chosen-state spectral/topological fingerprint for novelty.
-            if np.isfinite(best_score):
-                metric_history.append(best_metric_vec.copy())
-            if spiral_pts is None and len(path_xy) < step + 1:
+            if len(path_xy) < step + 1:
                 path_xy.append((cx, cy))
         seen_nodes.update(int(i) for i in coord_idx)
         seen_trait_nodes.update(int(i) for i in trait_idx)
 
         # ------------------------- update artists --------------------------
-        window.center = (cx, cy)
+        # Rectangle uses lower-left-corner anchor, not centre.
+        window.set_xy((cx - scan_half_m, cy - scan_half_m))
         # Path history trail.
-        if spiral_pts is not None:
-            path_line.set_data(spiral_pts[: step + 1, 0],
-                               spiral_pts[: step + 1, 1])
-        else:
-            pxy = np.asarray(path_xy_snapshot, dtype=float)
-            path_line.set_data(pxy[:, 0], pxy[:, 1])
+        pxy = np.asarray(path_xy_snapshot, dtype=float)
+        path_line.set_data(pxy[:, 0], pxy[:, 1])
 
-        # Chosen direction arrow.
-        dir_arrow.set_data([cx, cx + step_m * dirv[0]],
-                           [cy, cy + step_m * dirv[1]])
-        dir_head.set_offsets(np.array([[cx + step_m * dirv[0],
-                                        cy + step_m * dirv[1]]]))
+        # Chosen direction arrow — point to the actual next center so the
+        # arrow matches the motion (and, for betti-quadrant, the exact
+        # target used for scoring).
+        arrow_tip = (new_cx, new_cy)
+        dir_arrow.set_data([cx, arrow_tip[0]], [cy, arrow_tip[1]])
+        dir_head.set_offsets(np.array([[arrow_tip[0], arrow_tip[1]]]))
 
         # Local graph panel.
         knn_segs = [np.array([local_xy[a], local_xy[b]]) for a, b in e_knn]
@@ -717,8 +1055,10 @@ def run(args: argparse.Namespace) -> None:
         local_nodes.set_sizes(node_sizes)
         local_nodes.set_array(labels.astype(float) if n_local else np.array([]))
 
-        pad = 0.15 * args.window_m
-        lim = args.window_m + pad
+        # Local-graph panel axis limits: show the full square footprint
+        # plus a 15 % margin so edges near the perimeter aren't clipped.
+        pad = 0.15 * scan_half_m
+        lim = scan_half_m + pad
         ax01.set_xlim(cx - lim, cx + lim)
         ax01.set_ylim(cy - lim, cy + lim)
 
@@ -752,16 +1092,14 @@ def run(args: argparse.Namespace) -> None:
             cum_scat.set_offsets(np.c_[a_seen, e_seen])
             cum_scat.set_array(np.arange(len(sn)))
             cbar_cum.mappable.set_clim(0, max(1, len(sn)))
-            ax12.set_xlim(max(a_seen.min(), 0.01) * 0.8, a_seen.max() * 1.2)
+            ax12.set_xlim(max(float(np.nanmin(a_seen)), 1e-6) * 0.8, float(np.nanmax(a_seen)) * 1.2)
             ax12.set_ylim(-0.02, max(1.02, float(np.nanmax(e_seen)) + 0.02))
 
         fig.suptitle(
-            f"Bishop rocks explorer — step {step+1}/{args.steps}   "
-            f"policy={args.motion_policy}   "
-            f"window=({cx:.1f}, {cy:.1f}) m   "
-            f"graph_nodes={n_local}  traits={n_traits_local}   "
-            f"β₀={n_comp}   β₁={beta1_full}   "
-            f"λ₂={fied_full:.3g}   →{best_name}  (score={best_score:.2f})",
+            f"Bishop rocks explorer — step {step+1}/{args.steps} | "
+            f"window=({cx:.1f}, {cy:.1f}) m | graph_nodes={n_local} | traits={n_traits_local} | "
+            f"β₀={n_comp} | β₁={beta1_full} | λ₂={fied_full:.3g} | →{best_name} (score={best_score:.2f})\n"
+            f"{mission_params_line}",
             fontsize=11,
         )
 
@@ -774,28 +1112,40 @@ def run(args: argparse.Namespace) -> None:
         )
 
     if args.show:
+        # Live interactive mode runs update_step once per step with plt.pause;
+        # state is cleared on frame 0 inside update_step so a subsequent
+        # animation save starts from a clean slate.
         for s in range(args.steps):
             update_step(s)
             fig.canvas.draw_idle()
             plt.pause(args.pause_s)
         plt.ioff()
-    elif args.save_mp4 or args.save_gif:
+
+    anim_mp4: Path | None = None
+    anim_gif: Path | None = None
+    if not args.no_animation:
         ani = mpl_animation.FuncAnimation(
             fig, update_step, frames=args.steps,
             interval=max(20, int(args.pause_s * 1000)),
             blit=False, repeat=False,
         )
-        if args.save_mp4:
-            out = Path(args.save_mp4)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            ani.save(str(out), writer=mpl_animation.FFMpegWriter(fps=args.fps))
-            print(f"wrote MP4  : {out}")
-        else:
-            out = Path(args.save_gif)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            ani.save(str(out), writer=mpl_animation.PillowWriter(fps=args.fps))
-            print(f"wrote GIF  : {out}")
-    else:
+        base_name = _build_animation_base_name(args, step_m=step_m, scan_side_m=scan_side_m)
+        mp4_override = Path(args.save_mp4) if args.save_mp4 else None
+        gif_override = Path(args.save_gif) if args.save_gif else None
+        anim_mp4, anim_gif = _save_animation_mp4_and_gif(
+            ani,
+            out_dir=args.out,
+            base_name=base_name,
+            fps=max(1, int(args.fps)),
+            mp4_override=mp4_override,
+            gif_override=gif_override,
+            dpi=max(50, int(args.animation_dpi)),
+        )
+        print(f"wrote MP4  : {anim_mp4}")
+        print(f"wrote GIF  : {anim_gif}")
+    elif not args.show:
+        # No live display and no animation: still need to advance the sim so
+        # the final figure (saved below) reflects the full trajectory.
         for s in range(args.steps):
             update_step(s)
 
@@ -844,63 +1194,125 @@ def _build_parser() -> argparse.ArgumentParser:
                    help=f"Output folder (default: {DEFAULT_OUT_DIR})")
     p.add_argument("--steps", type=int, default=80,
                    help="Number of explorer steps (default: 80)")
-    p.add_argument("--window-m", type=float, default=40.0,
-                   help="Scan window radius in metres (default: 40)")
+    # Camera model (shared with the drone-DEM explorer; see
+    # ``kernelcal.graph_explorer.CameraModel``).  Square nadir footprint
+    # side = 2·altitude·tan(fov/2).  Defaults give ~71.5 m side (≈ prior
+    # 40 m disk radius) so existing runs keep the same ground coverage.
+    p.add_argument("--altitude-m", type=float, default=30.0,
+                   help="Drone altitude above the scarp in metres "
+                        "(default: 30). Feeds the shared CameraModel: "
+                        "scan footprint side = 2·altitude·tan(fov/2).")
+    p.add_argument("--fov-deg", type=float, default=100.0,
+                   help="Camera field-of-view angle in degrees (default: 100). "
+                        "Same knob as the drone-DEM explorer.")
+    p.add_argument("--scarp-resolution-m", type=float, default=0.5,
+                   help="Pixel size (metres) of the coverage raster used to "
+                        "compute unseen_frac with the same "
+                        "`1 - mean(visited[target_patch])` rule as the "
+                        "drone-DEM explorer (default: 0.5 m).")
     p.add_argument("--step-m", type=float, default=0.0,
-                   help="Move step size in metres (default: 0.6 * window-m)")
+                   help="Move step size in metres (default: scan_side_m / 2, "
+                        "matching the drone-DEM explorer's "
+                        "`half = side_px // 2` diagonal step).")
     p.add_argument("--knn", type=int, default=6,
                    help="k for k-NN graph (default: 6)")
-    p.add_argument("--motion-policy", choices=["greedy", "spectral-leaf", "spiral"], default="greedy",
-                   help="Direction policy. 'greedy' (default) scores candidate move "
-                        "directions by local k-NN topology + unseen rocks; "
-                        "'spectral-leaf' uses only spectral/topological metrics "
-                        "(β0, β1, λ2, IPR(v2), novelty, momentum); "
-                        "'spiral' walks a fixed outward spiral.")
+    p.add_argument(
+        "--fallback-diameter-m",
+        type=float,
+        default=_FALLBACK_DIAMETER_M,
+        help=(
+            "Diameter (metres) assigned to coord rocks that have no matching "
+            "row in rock_traits_full.csv. Such rocks are treated as circular "
+            "pebbles (eccentricity=0, area=π·(d/2)²). Default: 0.02 m = 2 cm."
+        ),
+    )
+    p.add_argument(
+        "--trait-match-tol-m",
+        type=float,
+        default=1.0,
+        help=(
+            "Nearest-neighbour tolerance (metres) for matching a coord rock "
+            "to a row in rock_traits_full.csv. Coord rocks farther than this "
+            "from any trait row are treated as missing-trait."
+        ),
+    )
+    p.add_argument(
+        "--no-impute-missing-traits",
+        action="store_true",
+        help=(
+            "Disable imputation of missing-trait rocks as 2 cm round pebbles. "
+            "Reverts to the pre-imputation behaviour where only measured "
+            "rocks contribute edges to the k-NN graph."
+        ),
+    )
+    p.add_argument(
+        "--min-edge-diameter-m",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum circular-equivalent diameter (metres) for a rock to be "
+            "eligible for k-NN edges.  Rocks below this threshold stay as "
+            "nodes (they still count in the scan window and in β₀/n) but "
+            "are excluded from the edge set, so they cannot close cycles. "
+            "Default 0 = no filter.  Example: --min-edge-diameter-m 0.05 "
+            "links only rocks >= 5 cm, dropping imputed 2 cm pebbles from "
+            "the graph topology without re-running imputation."
+        ),
+    )
     p.add_argument("--seed-x", type=float, default=None,
                    help="Starting x in metres (default: bbox centre)")
     p.add_argument("--seed-y", type=float, default=None,
                    help="Starting y in metres (default: bbox centre)")
-    p.add_argument("--w-beta1", type=float, default=1.0,
-                   help="Weight on normalized β₁/n (cycle density) in greedy direction score")
-    p.add_argument("--w-fiedler", type=float, default=20.0,
-                   help="Weight on Fiedler λ₂ in greedy direction score")
+    # Defaults match the shared kernelcal.graph_explorer.BettiWeights — same
+    # weights as the drone-DEM explorer's --w-beta1 / --w-beta0 / --w-unseen.
+    p.add_argument("--w-beta1", type=float, default=2.5,
+                   help="Weight on clip(β₁/n, 0, 1) (cycle density) in the "
+                        "quadrant-Betti score.")
     p.add_argument("--w-beta0", type=float, default=0.5,
-                   help="Penalty weight on normalized β₀/n (fragmentation)")
+                   help="Penalty weight on clip(β₀/n, 0, 1) (fragmentation).")
     p.add_argument("--w-unseen", type=float, default=5.0,
-                   help="Weight on unseen-rock fraction in candidate next FoV")
-    p.add_argument("--w-momentum", type=float, default=0.45,
-                   help="Momentum bonus term for directional continuity")
-    p.add_argument("--w-lambda-inv", type=float, default=3.0,
-                   help="Spectral-leaf: weight on inverse Fiedler term 1/(eps+λ₂)")
-    p.add_argument("--w-beta1-tree", type=float, default=2.0,
-                   help="Spectral-leaf: weight on tree-likeness proxy (1 - β₁/n)")
-    p.add_argument("--w-beta0-spectral", type=float, default=0.5,
-                   help="Spectral-leaf: weight on component density β₀/n")
-    p.add_argument("--w-ipr", type=float, default=1.5,
-                   help="Spectral-leaf: weight on IPR of Fiedler eigenvector")
-    p.add_argument("--w-novelty", type=float, default=1.0,
-                   help="Spectral-leaf: weight on metric novelty vs previous steps")
-    p.add_argument(
-        "--decision-noise-sigma",
-        type=float,
-        default=0.0,
-        help="Std-dev of Gaussian noise added to candidate scores (0 disables).",
-    )
-    p.add_argument(
-        "--decision-noise-seed",
-        type=int,
-        default=None,
-        help="Random seed for decision noise (for reproducible stochastic runs).",
-    )
+                   help="Weight on unseen-area fraction at the candidate target.")
+    p.add_argument("--revisit-penalty", type=float, default=0.5,
+                   help="Score penalty applied to candidates whose target "
+                        "position matches one of the last 20 visited centres.")
     p.add_argument("--pause-s", type=float, default=0.08,
                    help="Seconds to pause between frames when --show")
     p.add_argument("--show", action="store_true",
                    help="Open a live interactive window (uses plt.ion)")
-    p.add_argument("--save-mp4", type=str, default="",
-                   help="Also save animation as MP4 to this path")
-    p.add_argument("--save-gif", type=str, default="",
-                   help="Also save animation as GIF to this path")
+    p.add_argument(
+        "--save-mp4",
+        type=str,
+        default="",
+        help=(
+            "Explicit MP4 output path (overrides the auto-generated filename "
+            "for the MP4 output only). Both MP4 and GIF are still written."
+        ),
+    )
+    p.add_argument(
+        "--save-gif",
+        type=str,
+        default="",
+        help=(
+            "Explicit GIF output path (overrides the auto-generated filename "
+            "for the GIF output only). Both MP4 and GIF are still written."
+        ),
+    )
     p.add_argument("--fps", type=int, default=12, help="FPS for saved animation")
+    p.add_argument(
+        "--animation-dpi",
+        type=int,
+        default=120,
+        help="Render DPI for MP4/GIF frames (parity with DEM explorer).",
+    )
+    p.add_argument(
+        "--no-animation",
+        action="store_true",
+        help=(
+            "Skip MP4/GIF export. By default the explorer writes both formats "
+            "to --out with an auto-generated timestamped filename encoding "
+            "steps/scan_side/step/knn/fps."
+        ),
+    )
     return p
 
 

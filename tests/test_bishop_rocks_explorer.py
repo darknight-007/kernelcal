@@ -6,10 +6,8 @@ Covers only the analytical primitives (no matplotlib, no CSV I/O):
 - ``LocalFrame``: lon/lat → local metres projection
 - ``knn_edges``: k-nearest-neighbour edge set
 - ``adjacency_from_edges`` + ``fiedler_value``: Laplacian smallest nonzero
-- ``MOVE_DIRS`` + ``_normalize``: directional candidate utilities for greedy
-  motion policy
-- ``spiral_path``: rectangular spiral is bbox-clamped and has the requested
-  number of points
+- ``build_betti_quadrant_candidates``: quadrant splitter + unseen fraction
+  that feeds the shared ``kernelcal.graph_explorer`` planner
 """
 
 from __future__ import annotations
@@ -100,6 +98,98 @@ class TestGraphEdges:
         mask = bishop.trait_mask_for_coords(coords, traits)
         assert mask.tolist() == [False, True, True]
 
+
+# ---------------------------------------------------------------------------
+# Per-coord circular-equivalent diameter + size-based edge filter
+# ---------------------------------------------------------------------------
+
+
+class TestCoordDiameterAndSizeFilter:
+    def _frames(self):
+        # 4 coord rocks at x=0..3 m (y=0); two matched traits with distinct
+        # areas, two without any trait row.
+        coords = bishop.pd.DataFrame({
+            "lon": [0.0, 0.0, 0.0, 0.0],
+            "lat": [0.0, 0.0, 0.0, 0.0],
+            "x_m": [0.0, 1.0, 2.0, 3.0],
+            "y_m": [0.0, 0.0, 0.0, 0.0],
+        })
+        traits = bishop.pd.DataFrame({
+            "lon": [0.0, 0.0],
+            "lat": [0.0, 0.0],
+            "x_m": [0.0, 1.0],
+            "y_m": [0.0, 0.0],
+            # d = 2*sqrt(area/pi); area=pi/4 -> d=1 m, area=pi/400 -> d=0.1 m
+            "area_m2": [math.pi * 0.25, math.pi / 400.0],
+            "eccentricity": [0.0, 0.0],
+        })
+        return coords, traits
+
+    def test_returns_circular_equivalent_diameter(self):
+        coords, traits = self._frames()
+        d = bishop.coord_diameter_m_for_coords(coords, traits, tol_m=0.01)
+        assert d[0] == pytest.approx(1.0, rel=1e-6)
+        assert d[1] == pytest.approx(0.1, rel=1e-6)
+        # Unmatched rocks are NaN.
+        assert np.isnan(d[2])
+        assert np.isnan(d[3])
+
+    def test_empty_traits_gives_all_nan(self):
+        coords, _ = self._frames()
+        empty = bishop.pd.DataFrame(
+            columns=["lon", "lat", "x_m", "y_m", "area_m2", "eccentricity"]
+        )
+        d = bishop.coord_diameter_m_for_coords(coords, empty, tol_m=1.0)
+        assert d.shape == (4,)
+        assert np.all(np.isnan(d))
+
+    def test_tolerance_rejects_far_matches(self):
+        coords, traits = self._frames()
+        # Shift traits 10 m away; with tol_m = 0.5 no match should succeed.
+        traits = traits.copy()
+        traits["x_m"] = traits["x_m"] + 10.0
+        d = bishop.coord_diameter_m_for_coords(coords, traits, tol_m=0.5)
+        assert np.all(np.isnan(d))
+
+    def test_size_filter_excludes_small_rocks_from_edges(self):
+        # 4 colinear rocks: 0 (d=1m), 1 (d=0.1m), 2 (d=1m), 3 (d=1m).
+        # With min_edge_diameter=0.5m, node 1 should drop out of the edge
+        # set (same behaviour as no-trait), leaving edges only among 0,2,3.
+        coords, traits = self._frames()
+        coords = bishop.pd.concat([
+            coords,
+            bishop.pd.DataFrame({
+                "lon": [0.0, 0.0], "lat": [0.0, 0.0],
+                "x_m": [2.0, 3.0], "y_m": [0.0, 0.0],
+            })
+        ], ignore_index=True)
+        # Add trait rows for rocks at x=2 and x=3 with d=1 m.
+        extra = bishop.pd.DataFrame({
+            "lon": [0.0, 0.0], "lat": [0.0, 0.0],
+            "x_m": [2.0, 3.0], "y_m": [0.0, 0.0],
+            "area_m2": [math.pi * 0.25, math.pi * 0.25],
+            "eccentricity": [0.0, 0.0],
+        })
+        traits = bishop.pd.concat([traits, extra], ignore_index=True)
+
+        has_trait = bishop.trait_mask_for_coords(coords, traits, tol_m=0.01)
+        diameters = bishop.coord_diameter_m_for_coords(coords, traits, tol_m=0.01)
+        size_ok = np.where(np.isfinite(diameters), diameters >= 0.5, False)
+        edge_eligible = has_trait & size_ok
+        # Node at original index 1 (x=1, d=0.1m) is trait-linked but fails size.
+        assert has_trait[1] and not edge_eligible[1]
+
+        xy = np.c_[
+            coords["x_m"].to_numpy(float), coords["y_m"].to_numpy(float)
+        ]
+        edges = bishop.knn_edges_trait_only(xy, k=2, has_trait=edge_eligible)
+        # Node 1 (the 10 cm pebble) must not appear in any edge.
+        assert all(1 not in e for e in edges)
+        # The large rocks still form edges among themselves.
+        large_nodes = {a for a, _ in edges} | {b for _, b in edges}
+        assert 1 not in large_nodes
+        assert len(edges) >= 1
+
 # ---------------------------------------------------------------------------
 # Laplacian Fiedler value
 # ---------------------------------------------------------------------------
@@ -126,45 +216,152 @@ class TestFiedler:
 
 
 # ---------------------------------------------------------------------------
-# Directional-candidate utilities (greedy motion policy)
+# Legacy-API removal — make sure the trimmed bishop module is in lock-step
+# with DEM and no alternate motion policies / utilities remain behind.
 # ---------------------------------------------------------------------------
 
 
-class TestDirectionalUtilities:
-    def test_legacy_radius_and_quadrant_apis_removed(self):
-        assert not hasattr(bishop, "radius_edges")
-        assert not hasattr(bishop, "quadrant_metrics")
-
-    def test_move_dirs_contains_stay_and_cardinals(self):
-        names = [name for name, _vec in bishop.MOVE_DIRS]
-        assert "STAY" in names
-        for k in ("N", "S", "E", "W", "NE", "NW", "SE", "SW"):
-            assert k in names
-
-    def test_normalize_unit_and_zero(self):
-        ux, uy = bishop._normalize(3.0, 4.0)
-        assert ux == pytest.approx(0.6)
-        assert uy == pytest.approx(0.8)
-        zx, zy = bishop._normalize(0.0, 0.0)
-        assert zx == 0.0
-        assert zy == 0.0
+class TestLegacyAPIsRemoved:
+    @pytest.mark.parametrize("attr", [
+        "radius_edges",
+        "quadrant_metrics",
+        "MOVE_DIRS",
+        "_normalize",
+        "spiral_path",
+        "fiedler_value_and_ipr",
+    ])
+    def test_attribute_not_exposed(self, attr):
+        assert not hasattr(bishop, attr), (
+            f"bishop_rocks_graph_explorer should no longer expose {attr!r} "
+            "after the quadrant-Betti-only refactor."
+        )
 
 
 # ---------------------------------------------------------------------------
-# Spiral path (fallback planner)
+# Betti-quadrant candidate builder (shared planner with the DEM explorer)
 # ---------------------------------------------------------------------------
 
 
-class TestSpiralPath:
-    def test_shape_and_bbox_clamp(self):
-        pts = bishop.spiral_path(0.0, 10.0, 0.0, 10.0, step=2.0, n_steps=25)
-        assert pts.shape == (25, 2)
-        assert pts[:, 0].min() >= 0.0 - 1e-9
-        assert pts[:, 0].max() <= 10.0 + 1e-9
-        assert pts[:, 1].min() >= 0.0 - 1e-9
-        assert pts[:, 1].max() <= 10.0 + 1e-9
+class TestBettiQuadrantCandidates:
+    def _setup(self):
+        """Four clearly-separated clusters, one in each diagonal quadrant."""
+        rng = np.random.default_rng(0)
 
-    def test_starts_at_bbox_centre(self):
-        pts = bishop.spiral_path(-5.0, 5.0, -5.0, 5.0, step=1.0, n_steps=3)
-        assert pts[0, 0] == pytest.approx(0.0)
-        assert pts[0, 1] == pytest.approx(0.0)
+        def cluster(cx, cy, n):
+            return rng.normal(loc=(cx, cy), scale=0.8, size=(n, 2))
+
+        # Variable counts per quadrant so the "best β₁/n" result is meaningful.
+        xy = np.vstack([
+            cluster(-10.0, +10.0, 30),   # NW — dense
+            cluster(+10.0, +10.0, 10),   # NE — sparse
+            cluster(-10.0, -10.0, 20),   # SW
+            cluster(+10.0, -10.0, 25),   # SE
+        ])
+        has_trait = np.ones(len(xy), dtype=bool)
+        return xy, has_trait
+
+    def test_returns_one_candidate_per_quadrant(self):
+        xy, has_trait = self._setup()
+        cands = bishop.build_betti_quadrant_candidates(
+            0.0, 0.0, scan_side_m=40.0, step_m=10.0,
+            coord_xy=xy, coord_has_trait=has_trait, knn=4,
+        )
+        names = sorted(c.name for c in cands)
+        assert names == ["NE", "NW", "SE", "SW"]
+        for c in cands:
+            assert c.n_nodes > 0
+            assert c.beta0 >= 1
+            assert c.beta1 >= 0
+
+    def test_target_positions_match_metric_convention(self):
+        xy, has_trait = self._setup()
+        cands = bishop.build_betti_quadrant_candidates(
+            0.0, 0.0, scan_side_m=40.0, step_m=10.0,
+            coord_xy=xy, coord_has_trait=has_trait, knn=4,
+        )
+        by_name = {c.name: c for c in cands}
+        # NW is (-x, +y) in metric coords.
+        assert by_name["NW"].extra["target_xy"] == pytest.approx((-10.0, 10.0))
+        assert by_name["NE"].extra["target_xy"] == pytest.approx((10.0, 10.0))
+        assert by_name["SW"].extra["target_xy"] == pytest.approx((-10.0, -10.0))
+        assert by_name["SE"].extra["target_xy"] == pytest.approx((10.0, -10.0))
+
+    def test_empty_window_returns_no_candidates(self):
+        xy, has_trait = self._setup()
+        # Centre far outside the clusters → the square window is empty.
+        cands = bishop.build_betti_quadrant_candidates(
+            1000.0, 1000.0, scan_side_m=10.0, step_m=5.0,
+            coord_xy=xy, coord_has_trait=has_trait, knn=4,
+        )
+        assert cands == []
+
+    def test_raster_coverage_reduces_unseen_frac(self):
+        """Matches the drone-DEM explorer: ``unseen = 1 - mean(visited[target])``.
+
+        With an unpainted raster every target is fully unseen; painting the
+        raster everywhere drops unseen to 0 at every candidate's target.
+        """
+        from kernelcal.graph_explorer import CoverageRaster
+        xy, has_trait = self._setup()
+
+        fresh = CoverageRaster(bbox=(-25.0, 25.0, -25.0, 25.0), resolution_m=1.0)
+        no_cov = bishop.build_betti_quadrant_candidates(
+            0.0, 0.0, scan_side_m=50.0, step_m=10.0,
+            coord_xy=xy, coord_has_trait=has_trait, knn=4,
+            visited_raster=fresh,
+        )
+
+        painted = CoverageRaster(bbox=(-25.0, 25.0, -25.0, 25.0), resolution_m=1.0)
+        # Paint the entire raster visited by marking a huge square covering
+        # the whole bbox.
+        painted.mark_square(0.0, 0.0, 1000.0)
+        all_cov = bishop.build_betti_quadrant_candidates(
+            0.0, 0.0, scan_side_m=50.0, step_m=10.0,
+            coord_xy=xy, coord_has_trait=has_trait, knn=4,
+            visited_raster=painted,
+        )
+        assert all(c.unseen_frac == 1.0 for c in no_cov)
+        assert all(c.unseen_frac == 0.0 for c in all_cov)
+
+    def test_unseen_matches_dem_area_semantics(self):
+        """Rockless target area should not be treated as attractive.
+
+        Unlike the previous per-rock semantics, the area-based unseen is
+        well-defined even when the target window has no rocks: a target
+        sitting entirely inside the painted region returns unseen=0
+        regardless of how sparse the rock cloud is there.  This is the
+        DEM-style behaviour the user requested.
+        """
+        from kernelcal.graph_explorer import CoverageRaster
+        # Rocks only in NE.
+        rng = np.random.default_rng(1)
+        xy = rng.normal(loc=(5.0, 5.0), scale=0.5, size=(20, 2))
+        has_trait = np.ones(len(xy), dtype=bool)
+
+        # Pre-paint the SW region as visited.
+        raster = CoverageRaster(bbox=(-30.0, 30.0, -30.0, 30.0), resolution_m=0.5)
+        raster.mark_square(-15.0, -15.0, 20.0)
+
+        cands = bishop.build_betti_quadrant_candidates(
+            5.0, 5.0, scan_side_m=4.0, step_m=20.0,
+            coord_xy=xy, coord_has_trait=has_trait, knn=3,
+            visited_raster=raster,
+        )
+        by_name = {c.name: c for c in cands}
+        # SW target at (-15, -15) lies fully inside the painted area → 0.0.
+        if "SW" in by_name:
+            assert by_name["SW"].unseen_frac == 0.0
+
+    def test_bbox_clamps_target_positions(self):
+        xy, has_trait = self._setup()
+        # Tight bbox inside the clusters; targets should be clamped to it.
+        bbox = (-3.0, 3.0, -3.0, 3.0)
+        cands = bishop.build_betti_quadrant_candidates(
+            0.0, 0.0, scan_side_m=50.0, step_m=10.0,
+            coord_xy=xy, coord_has_trait=has_trait, knn=4,
+            bbox=bbox,
+        )
+        for c in cands:
+            tx, ty = c.extra["target_xy"]
+            assert -3.0 <= tx <= 3.0 + 1e-9
+            assert -3.0 <= ty <= 3.0 + 1e-9

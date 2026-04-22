@@ -46,6 +46,17 @@ spectral
     every Section 3 claim of the companion paper numerically visible.
     (Paper §3: Propositions 1–3, Corollaries 1–3, Remarks 4, 8, Q6)
 
+graph_explorer
+    Shared exploration-policy primitives used by both the drone-DEM
+    explorer and the bishop-rocks k-NN graph explorer: ``BettiWeights``,
+    ``Candidate``, ``score_betti_candidate``, ``choose_best_candidate``
+    for the canonical ``w_beta1·β₁/n − w_beta0·β₀/n + w_unseen·unseen``
+    score with revisit penalty and cyclic tie-break; plus
+    ``CameraModel`` (``altitude + fov → footprint_side_m``) and
+    ``CoverageRaster`` (bool visited-mask over a metric bbox for
+    ``1 − mean(visited[target])`` unseen semantics).  (Paper §P4 Δβ₁
+    biosignature signal)
+
 blender
     Blender/bpy integration for spectral digital twins.  Strict separation of
     concerns: Blender owns geometry and ground truth; kernelcal.geo3d owns all
