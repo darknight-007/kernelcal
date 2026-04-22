@@ -201,15 +201,50 @@ def _edge_set_from_neighbors(neighbors: list[np.ndarray], *,
     return es
 
 
-def knn_edges(xy: np.ndarray, k: int) -> set[tuple[int, int]]:
+def knn_edges(
+    xy: np.ndarray,
+    k: int,
+    *,
+    max_edge_m: float | None = None,
+) -> set[tuple[int, int]]:
+    """k-nearest-neighbour edge set over 2-D points.
+
+    When ``max_edge_m`` is a positive finite number, edges whose Euclidean
+    length exceeds ``max_edge_m`` are dropped, so a point may end up with
+    fewer than ``k`` neighbours (possibly zero).  ``max_edge_m`` of 0,
+    ``None``, ``inf`` or ``nan`` disables the cap and recovers the
+    uncapped k-NN behaviour used by earlier Bishop runs.
+    """
     if len(xy) < 2:
         return set()
     tree = cKDTree(xy)
     kq = min(k + 1, len(xy))   # +1 because query returns self
-    _, idx = tree.query(xy, k=kq)
+    dist, idx = tree.query(xy, k=kq)
     if idx.ndim == 1:
         idx = idx[:, None]
-    return _edge_set_from_neighbors([row for row in idx])
+        dist = dist[:, None]
+
+    has_cap = (
+        max_edge_m is not None
+        and np.isfinite(max_edge_m)
+        and float(max_edge_m) > 0.0
+    )
+    if not has_cap:
+        return _edge_set_from_neighbors([row for row in idx])
+
+    cap = float(max_edge_m)
+    n_pts = len(xy)
+    es: set[tuple[int, int]] = set()
+    for i in range(n_pts):
+        for d_ij, j in zip(dist[i], idx[i]):
+            j_int = int(j)
+            if j_int == i:
+                continue
+            if not np.isfinite(d_ij) or float(d_ij) > cap:
+                continue
+            a, b = (i, j_int) if i < j_int else (j_int, i)
+            es.add((a, b))
+    return es
 
 
 def trait_mask_for_coords(
@@ -351,8 +386,18 @@ def coord_diameter_m_for_coords(
     return out
 
 
-def knn_edges_trait_only(xy: np.ndarray, k: int, has_trait: np.ndarray) -> set[tuple[int, int]]:
-    """k-NN edges between nodes with traits only; others stay isolated."""
+def knn_edges_trait_only(
+    xy: np.ndarray,
+    k: int,
+    has_trait: np.ndarray,
+    *,
+    max_edge_m: float | None = None,
+) -> set[tuple[int, int]]:
+    """k-NN edges between edge-eligible nodes only; others stay isolated.
+
+    ``max_edge_m`` forwards to :func:`knn_edges` and caps the maximum
+    Euclidean edge length (see that function's docstring).
+    """
     n = int(len(xy))
     if n < 2:
         return set()
@@ -363,7 +408,7 @@ def knn_edges_trait_only(xy: np.ndarray, k: int, has_trait: np.ndarray) -> set[t
     if active.size < 2:
         return set()
 
-    sub_edges = knn_edges(xy[active], k)
+    sub_edges = knn_edges(xy[active], k, max_edge_m=max_edge_m)
     out: set[tuple[int, int]] = set()
     for i_sub, j_sub in sub_edges:
         i = int(active[int(i_sub)])
@@ -435,6 +480,7 @@ def build_betti_quadrant_candidates(
     knn: int,
     visited_raster: CoverageRaster | None = None,
     bbox: tuple[float, float, float, float] | None = None,
+    knn_max_edge_m: float | None = None,
 ) -> list[Candidate]:
     """Build 4 quadrant candidates for the shared Betti scorer.
 
@@ -496,9 +542,13 @@ def build_betti_quadrant_candidates(
         q_has_trait = win_has_trait[q_mask]
 
         # k-NN graph on the quadrant's rocks; edges only between trait-having
-        # rocks (same rule as the main window graph).
+        # rocks (same rule as the main window graph).  ``knn_max_edge_m``
+        # propagates the max-edge-length cap from the CLI so per-quadrant
+        # Betti numbers match the local graph that ends up rendered.
         q_edges = (
-            knn_edges_trait_only(q_xy, int(knn), q_has_trait)
+            knn_edges_trait_only(
+                q_xy, int(knn), q_has_trait, max_edge_m=knn_max_edge_m
+            )
             if n_q >= 2 else set()
         )
         q_A = adjacency_from_edges(max(n_q, 1), q_edges)
@@ -625,7 +675,22 @@ def _save_animation_mp4_and_gif(
     gif_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        mp4_writer = mpl_animation.FFMpegWriter(fps=max(1, int(fps)))
+        # libx264 + yuv420p chroma subsampling requires both pixel
+        # dimensions to be even.  matplotlib's constrained-layout can
+        # produce an odd width/height at save time (e.g. 1920x1165 on
+        # some displays), which makes ffmpeg abort with
+        # "height not divisible by 2".  The ``pad=ceil(iw/2)*2:...``
+        # video filter appends at most one black pixel on the right /
+        # bottom edge so the encoder always sees an even canvas.
+        mp4_writer = mpl_animation.FFMpegWriter(
+            fps=max(1, int(fps)),
+            extra_args=[
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=black",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+        )
         ani.save(str(mp4_path), writer=mp4_writer, dpi=dpi)
         if not (mp4_path.exists() and mp4_path.stat().st_size > 0):
             raise RuntimeError(f"MP4 writer completed but file is empty: {mp4_path}")
@@ -712,7 +777,9 @@ def run(args: argparse.Namespace) -> None:
         f"scan_side={scan_side_m:g}m | step_m={step_m:g} | "
         f"raster={args.scarp_resolution_m:g}m/px "
         f"({visited_raster.shape[0]}x{visited_raster.shape[1]}) | "
-        f"knn={args.knn} | fps={args.fps}"
+        f"knn={args.knn} | "
+        f"knn_max_edge={args.knn_max_edge_m:g}m | "
+        f"fps={args.fps}"
     )
 
     # All coord rocks are candidate nodes; only nodes with trait rows
@@ -757,6 +824,25 @@ def run(args: argparse.Namespace) -> None:
         )
     else:
         coord_edge_eligible = coord_has_trait
+
+    # Optional per-edge length cap: k-NN edges longer than
+    # ``--knn-max-edge-m`` are dropped before any topology measurement.
+    # Threshold must be positive and finite; 0/negative/NaN/None disables.
+    # A rock may end up with fewer than ``--knn`` neighbours once the cap
+    # is in effect, and can even become isolated (β₀ goes up, β₁ stays
+    # pinned to 0 for that node).  This is useful when you want k-NN's
+    # adaptive density behaviour but also a hard "don't link rocks farther
+    # apart than D metres" rule — for example to avoid long cross-scarp
+    # edges that are geometrically spurious.
+    knn_max_edge_raw = float(args.knn_max_edge_m)
+    knn_max_edge_m: float | None = (
+        knn_max_edge_raw
+        if np.isfinite(knn_max_edge_raw) and knn_max_edge_raw > 0.0
+        else None
+    )
+    if knn_max_edge_m is not None:
+        print(f"knn-max-edge     : {knn_max_edge_m:g} m "
+              f"(edges longer than this are dropped from the k-NN graph)")
 
     # Path is built online (the quadrant-Betti planner chooses the next
     # centre from the 4 diagonal rock quadrants).
@@ -935,7 +1021,12 @@ def run(args: argparse.Namespace) -> None:
 
         local_has_trait = coord_edge_eligible[coord_idx] if n_local else np.empty((0,), dtype=bool)
         if n_local >= 2:
-            e_knn = knn_edges_trait_only(local_xy, args.knn, local_has_trait)
+            e_knn = knn_edges_trait_only(
+                local_xy,
+                args.knn,
+                local_has_trait,
+                max_edge_m=knn_max_edge_m,
+            )
         else:
             e_knn = set()
 
@@ -965,6 +1056,7 @@ def run(args: argparse.Namespace) -> None:
             knn=int(args.knn),
             visited_raster=visited_raster,
             bbox=(xmin, xmax, ymin, ymax),
+            knn_max_edge_m=knn_max_edge_m,
         )
         weights = BettiWeights(
             w_beta1=float(args.w_beta1),
@@ -1214,6 +1306,19 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Move step size in metres (default: scan_side_m / 2, "
                         "matching the drone-DEM explorer's "
                         "`half = side_px // 2` diagonal step).")
+    p.add_argument(
+        "--knn-max-edge-m",
+        type=float,
+        default=0.0,
+        help=(
+            "Maximum Euclidean edge length (metres) in the k-NN graph. "
+            "Edges longer than this threshold are dropped, so a rock may "
+            "end up with fewer than --knn neighbours (or none). Default 0 "
+            "= no cap (pure k-NN). Example: --knn-max-edge-m 5.0 keeps "
+            "k-NN adaptivity but forbids cross-scarp links longer than "
+            "5 m."
+        ),
+    )
     p.add_argument("--knn", type=int, default=6,
                    help="k for k-NN graph (default: 6)")
     p.add_argument(

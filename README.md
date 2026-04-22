@@ -391,6 +391,18 @@ Drop sub-5 cm pebbles from the graph topology while keeping them as nodes
 python3 examples/bishop/bishop_rocks_graph_explorer.py --min-edge-diameter-m 0.05
 ```
 
+Cap the maximum Euclidean length of a k-NN edge at 2 m (rocks may end up
+with fewer than `--knn` neighbours or even isolated — useful when k-NN's
+adaptive density produces long, geometrically spurious cross-scarp links):
+
+```bash
+python3 examples/bishop/bishop_rocks_graph_explorer.py --knn 6 --knn-max-edge-m 2.0
+```
+
+> **Note.** `--knn` controls the *number* of neighbours each rock reaches for;
+> `--knn-max-edge-m` is the only distance-based knob. Default `0` disables
+> the cap and recovers pure k-NN behaviour.
+
 **Trait imputation.** Most `rocks-coord-list.csv` entries do not have a
 matching row in `rock_traits_full.csv`. By default the explorer imputes
 them as 2 cm circular pebbles (`--fallback-diameter-m 0.02`, eccentricity
@@ -1339,6 +1351,28 @@ Cite the arXiv papers for the framework, **in preparation** manuscripts when cit
 ## Changelog
 
 ### Unreleased
+- **New: `--knn-max-edge-m` Euclidean edge-length cap in the Bishop explorer**
+  - `knn_edges(..., max_edge_m=None)` and `knn_edges_trait_only(..., max_edge_m=None)`
+    now accept a positive finite cap (metres) and drop any k-NN edge longer
+    than the threshold. A rock can end up with fewer than `--knn`
+    neighbours (or fully isolated) — useful for excising geometrically
+    spurious long-range links without reducing `--knn`.
+  - `build_betti_quadrant_candidates(..., knn_max_edge_m=None)` forwards the
+    cap to every per-quadrant sub-graph so main-window and scored-quadrant
+    β₀/β₁ stay consistent.
+  - `0`, negative, `inf`, or `nan` all disable the cap and recover pure
+    k-NN behaviour (default).
+  - 4 new tests in `tests/test_bishop_rocks_explorer.py::TestKnnMaxEdge`
+    (no-cap identity, long-edge drop, full-isolation edge case,
+    trait-only propagation).
+- **Fixed: libx264 "height not divisible by 2" MP4 encode failure**
+  - Both `examples/bishop/bishop_rocks_graph_explorer.py` and
+    `examples/controller/drone_dem_betti_adaptive_experiment.py` now pass
+    `-vf pad=ceil(iw/2)*2:ceil(ih/2)*2:color=black -pix_fmt yuv420p` to
+    `FFMpegWriter`. When `constrained_layout` produces an odd-pixel
+    dimension (e.g. 1920×1165) the filter adds at most one black pixel
+    on the right/bottom edge so libx264's `yuv420p` 2×2 chroma
+    subsampling is satisfied. No-op when dimensions are already even.
 - **New: `kernelcal.graph_explorer` shared planner subpackage** — extracts the
   drone-DEM / Bishop scarp common exploration logic so the policy is defined
   exactly once

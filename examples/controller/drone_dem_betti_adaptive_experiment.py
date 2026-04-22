@@ -2129,7 +2129,22 @@ def save_animation(
     mp4_path = out_dir / f"{base_name}.mp4"
     gif_path = out_dir / f"{base_name}.gif"
     try:
-        mp4_writer = mpl_animation.FFMpegWriter(fps=max(1, fps))
+        # libx264 + yuv420p chroma subsampling requires both pixel
+        # dimensions to be even.  matplotlib's constrained-layout can
+        # render an odd width/height (e.g. 1920x1165 on some displays),
+        # which makes ffmpeg abort with "height not divisible by 2".
+        # The ``pad=ceil(iw/2)*2:...`` video filter appends at most one
+        # black pixel on the right / bottom edge so the encoder always
+        # sees an even canvas.
+        mp4_writer = mpl_animation.FFMpegWriter(
+            fps=max(1, fps),
+            extra_args=[
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=black",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+        )
         ani.save(mp4_path, writer=mp4_writer, dpi=120)
         if not (mp4_path.exists() and mp4_path.stat().st_size > 0):
             raise RuntimeError(f"MP4 writer completed but file is empty: {mp4_path}")

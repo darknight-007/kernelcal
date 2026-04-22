@@ -100,6 +100,58 @@ class TestGraphEdges:
 
 
 # ---------------------------------------------------------------------------
+# --knn-max-edge-m: Euclidean max-edge-length cap on k-NN edges
+# ---------------------------------------------------------------------------
+
+
+class TestKnnMaxEdge:
+    def _line_points(self) -> np.ndarray:
+        # 4 collinear rocks spaced at 1 m, 1 m, 3 m intervals.
+        #   index : 0    1    2    3
+        #   x (m) : 0.0  1.0  2.0  5.0
+        # Nearest-neighbour distances:
+        #   0 <-> 1 = 1.0   1 <-> 2 = 1.0   2 <-> 3 = 3.0
+        # A cap at 2.0 m must drop the (2, 3) edge but keep (0, 1) and (1, 2).
+        return np.array(
+            [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [5.0, 0.0]], dtype=float
+        )
+
+    def test_none_cap_matches_plain_knn(self):
+        xy = self._line_points()
+        baseline = bishop.knn_edges(xy, k=2)
+        assert bishop.knn_edges(xy, k=2, max_edge_m=None) == baseline
+        assert bishop.knn_edges(xy, k=2, max_edge_m=0.0) == baseline
+        assert bishop.knn_edges(xy, k=2, max_edge_m=-3.0) == baseline
+        assert bishop.knn_edges(xy, k=2, max_edge_m=float("nan")) == baseline
+        assert bishop.knn_edges(xy, k=2, max_edge_m=float("inf")) == baseline
+
+    def test_cap_drops_edges_longer_than_threshold(self):
+        xy = self._line_points()
+        edges = bishop.knn_edges(xy, k=2, max_edge_m=2.0)
+        # Long edge (2, 3) with length 3.0 m must be gone; short edges stay.
+        assert (2, 3) not in edges
+        assert (0, 1) in edges
+        assert (1, 2) in edges
+
+    def test_cap_can_fully_isolate_a_node(self):
+        xy = self._line_points()
+        edges = bishop.knn_edges(xy, k=2, max_edge_m=0.5)
+        # Every pairwise distance exceeds 0.5 m → empty edge set.
+        assert edges == set()
+
+    def test_cap_propagates_through_trait_only(self):
+        xy = self._line_points()
+        has_trait = np.array([True, True, True, True], dtype=bool)
+        full = bishop.knn_edges_trait_only(xy, k=2, has_trait=has_trait)
+        capped = bishop.knn_edges_trait_only(
+            xy, k=2, has_trait=has_trait, max_edge_m=2.0
+        )
+        assert (2, 3) in full and (2, 3) not in capped
+        # Short edges unchanged.
+        assert capped & {(0, 1), (1, 2)} == {(0, 1), (1, 2)}
+
+
+# ---------------------------------------------------------------------------
 # Per-coord circular-equivalent diameter + size-based edge filter
 # ---------------------------------------------------------------------------
 
