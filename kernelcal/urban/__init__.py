@@ -6,4 +6,18 @@ where the controller is urban planning / zoning law.
 
 Main entry: city_graph.py
 """
-from .city_graph import fetch_buildings, buildings_to_graph, CityGraph
+from .city_graph import (
+    CityGraph,
+    buildings_to_graph,
+    buildings_to_graph_from_bbox,
+    fetch_buildings,
+    fetch_buildings_bbox,
+)
+
+__all__ = [
+    'CityGraph',
+    'buildings_to_graph',
+    'buildings_to_graph_from_bbox',
+    'fetch_buildings',
+    'fetch_buildings_bbox',
+]
