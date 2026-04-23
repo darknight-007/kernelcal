@@ -100,6 +100,162 @@ def _cache_path(place: str, cache_dir: Path) -> Path:
     return cache_dir / f'buildings_{safe}.geojson'
 
 
+def _compute_traits_inplace(gdf: 'gpd.GeoDataFrame') -> 'gpd.GeoDataFrame':
+    """Project to local UTM, compute area/height/type/compacity traits and
+    centroid columns on *gdf*. Shared by address- and bbox-based fetchers.
+
+    Mutates the input GeoDataFrame and returns it for chaining convenience.
+    """
+    gdf = gdf[gdf.geometry.geom_type.isin(['Polygon', 'MultiPolygon'])].copy()
+    if len(gdf) == 0:
+        return gdf
+
+    gdf = gdf.to_crs(gdf.estimate_utm_crs())
+
+    gdf['area_m2']   = gdf.geometry.area
+    gdf['perimeter'] = gdf.geometry.length
+    gdf['compacity'] = gdf['perimeter']**2 / (4 * math.pi * gdf['area_m2'].clip(1e-3))
+
+    def _height(row) -> float:
+        h = row.get('height', None)
+        if h is not None:
+            try:
+                return float(str(h).split()[0])
+            except Exception:
+                pass
+        lv = row.get('building:levels', None)
+        if lv is not None:
+            try:
+                return float(lv) * 3.2
+            except Exception:
+                pass
+        return 3.2
+    gdf['height_m'] = gdf.apply(_height, axis=1)
+
+    def _type_enc(row) -> int:
+        bt = row.get('building', 'yes')
+        if not isinstance(bt, str):
+            bt = 'yes'
+        return _TYPE_MAP.get(bt.lower(), 0)
+    gdf['type_enc'] = gdf.apply(_type_enc, axis=1)
+
+    cents = gdf.geometry.centroid
+    gdf['cx'] = cents.x
+    gdf['cy'] = cents.y
+    return gdf
+
+
+def _bbox_cache_path(bbox: tuple[float, float, float, float],
+                     cache_dir: Path) -> Path:
+    """Cache key for a bbox: quantize to 1e-4° (~11 m) so neighbouring
+    viewports hit the same cache entry."""
+    south, west, north, east = bbox
+    q = lambda v: f'{round(float(v), 4):+.4f}'
+    safe = f'{q(south)}_{q(west)}_{q(north)}_{q(east)}'
+    return cache_dir / f'buildings_bbox_{safe}.geojson'
+
+
+def fetch_buildings_bbox(
+    south: float,
+    west: float,
+    north: float,
+    east: float,
+    cache_dir: Path | str = Path('/tmp/kernelcal_urban_cache'),
+    force_refresh: bool = False,
+    timeout: int = 120,
+) -> 'gpd.GeoDataFrame':
+    """Download OSM building footprints inside a WGS84 bbox.
+
+    The bbox mirrors CesiumJS's ``camera.computeViewRectangle`` convention:
+    four floats in decimal degrees. All other behaviour (trait computation,
+    UTM reprojection, disk cache) matches :func:`fetch_buildings`.
+
+    Parameters
+    ----------
+    south, west, north, east : float
+        Bounding box in degrees (EPSG:4326). Must satisfy
+        ``south < north`` and ``west < east`` (no antimeridian wrap).
+    cache_dir : Path | str
+        Directory for .geojson cache files. Key is quantized to 1e-4° so
+        nearby viewports share hits.
+    force_refresh : bool
+        Ignore cache and re-download.
+    timeout : int
+        osmnx HTTP timeout in seconds.
+
+    Returns
+    -------
+    GeoDataFrame with columns: geometry (Polygon), area_m2, height_m,
+    building_type, type_enc, compacity, cx, cy. Empty GeoDataFrame if
+    no building polygons exist in the bbox (does *not* raise).
+
+    Raises
+    ------
+    ImportError  : osmnx/geopandas missing.
+    ValueError   : degenerate bbox (south >= north or west >= east).
+    RuntimeError : osmnx/Overpass fetch failed after *timeout* seconds.
+    """
+    if not HAS_OSM:
+        raise ImportError('osmnx and geopandas are required: pip install osmnx')
+    if not (south < north and west < east):
+        raise ValueError(
+            f'Degenerate bbox: south={south}, west={west}, '
+            f'north={north}, east={east}'
+        )
+
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cp = _bbox_cache_path((south, west, north, east), cache_dir)
+
+    if cp.exists() and not force_refresh:
+        print(f'    [cache] Loading {cp.name}')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            gdf = gpd.read_file(cp)
+        return gdf
+
+    print(f'    [OSM] Fetching buildings in bbox '
+          f'({south:.4f},{west:.4f})–({north:.4f},{east:.4f}) …')
+    ox.settings.timeout = timeout
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        try:
+            # Prefer the modern osmnx>=2 signature (bbox tuple); fall back
+            # to the legacy positional (north, south, east, west) form.
+            try:
+                gdf = ox.features_from_bbox(
+                    bbox=(west, south, east, north),
+                    tags={'building': True},
+                )
+            except TypeError:
+                gdf = ox.features_from_bbox(
+                    north, south, east, west,
+                    tags={'building': True},
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                f'osmnx bbox fetch failed for ({south},{west},{north},{east}): {exc}'
+            ) from exc
+
+    gdf = _compute_traits_inplace(gdf)
+    if len(gdf) == 0:
+        # Write an empty sentinel so repeated empty viewports don't re-hit OSM
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            gpd.GeoDataFrame(geometry=[]).to_file(cp, driver='GeoJSON')
+        print(f'    [cache] No buildings; wrote empty sentinel → {cp.name}')
+        return gdf
+
+    keep_cols = ['geometry', 'area_m2', 'height_m', 'type_enc',
+                 'compacity', 'cx', 'cy']
+    save_cols = [c for c in keep_cols if c in gdf.columns]
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gdf[save_cols].to_file(cp, driver='GeoJSON')
+    print(f'    [cache] Saved {len(gdf)} buildings → {cp.name}')
+    return gdf
+
+
 def fetch_buildings(
     place: str,
     cache_dir: Path | str = Path('/tmp/kernelcal_urban_cache'),
@@ -147,50 +303,9 @@ def fetch_buildings(
         except Exception as exc:
             raise RuntimeError(f'osmnx fetch failed for "{place}": {exc}') from exc
 
-    # Keep only polygonal footprints
-    gdf = gdf[gdf.geometry.geom_type.isin(['Polygon', 'MultiPolygon'])].copy()
+    gdf = _compute_traits_inplace(gdf)
     if len(gdf) == 0:
         raise ValueError(f'No building polygons found for: {place}')
-
-    # Project to UTM for metric calculations
-    gdf = gdf.to_crs(gdf.estimate_utm_crs())
-
-    # Compute traits
-    gdf['area_m2']   = gdf.geometry.area
-    gdf['perimeter'] = gdf.geometry.length
-    gdf['compacity'] = gdf['perimeter']**2 / (4 * math.pi * gdf['area_m2'].clip(1e-3))
-
-    # Height: prefer 'height' field, then estimate from levels
-    def _height(row) -> float:
-        h = row.get('height', None)
-        if h is not None:
-            try:
-                return float(str(h).split()[0])
-            except Exception:
-                pass
-        lv = row.get('building:levels', None)
-        if lv is not None:
-            try:
-                return float(lv) * 3.2
-            except Exception:
-                pass
-        return 3.2   # default single-storey
-
-    gdf['height_m'] = gdf.apply(_height, axis=1)
-
-    # Building type encoding
-    def _type_enc(row) -> int:
-        bt = row.get('building', 'yes')
-        if not isinstance(bt, str):
-            bt = 'yes'
-        return _TYPE_MAP.get(bt.lower(), 0)
-
-    gdf['type_enc'] = gdf.apply(_type_enc, axis=1)
-
-    # Centroid
-    cents = gdf.geometry.centroid
-    gdf['cx'] = cents.x
-    gdf['cy'] = cents.y
 
     # Save cache (only geometry + computed columns)
     keep_cols = ['geometry', 'area_m2', 'height_m', 'type_enc',
@@ -323,4 +438,45 @@ def buildings_to_graph(
         n_buildings=n_total,
         bounds_m=(xmin, ymin, xmax, ymax),
         raw_gdf=gdf,
+    )
+
+
+def buildings_to_graph_from_bbox(
+    south: float,
+    west:  float,
+    north: float,
+    east:  float,
+    name:  str | None = None,
+    k:     int   = 8,
+    n_max: int   = 1500,
+    sigma_frac: float = 0.05,
+    cache_dir: Path | str = Path('/tmp/kernelcal_urban_cache'),
+    force_refresh: bool = False,
+    timeout: int = 120,
+    seed:  int   = 42,
+) -> CityGraph | None:
+    """Convenience one-shot: bbox → OSM fetch → proximity graph → CityGraph.
+
+    Thin wrapper that chains :func:`fetch_buildings_bbox` into
+    :func:`buildings_to_graph`. Intended for viewport-driven callers (e.g.,
+    a live Cesium client POSTing ``camera.computeViewRectangle`` extents).
+
+    Returns
+    -------
+    CityGraph on success, or ``None`` if the bbox contains no buildings.
+    """
+    gdf = fetch_buildings_bbox(
+        south, west, north, east,
+        cache_dir=cache_dir,
+        force_refresh=force_refresh,
+        timeout=timeout,
+    )
+    if len(gdf) == 0:
+        return None
+
+    label = name or f'bbox_{south:.4f}_{west:.4f}_{north:.4f}_{east:.4f}'
+    place = f'bbox(S={south:.4f}, W={west:.4f}, N={north:.4f}, E={east:.4f})'
+    return buildings_to_graph(
+        gdf, name=label, place=place,
+        k=k, n_max=n_max, sigma_frac=sigma_frac, seed=seed,
     )
