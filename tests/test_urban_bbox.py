@@ -147,6 +147,36 @@ def test_buildings_to_graph_from_bbox_end_to_end(monkeypatch, tmp_path):
     assert np.allclose(cg.W, cg.W.T)
 
 
+def test_fetch_buildings_bbox_uses_correct_osmnx_tuple_order(monkeypatch, tmp_path):
+    """osmnx 1.x expects bbox=(north, south, east, west); 2.x expects (west, south, east, north).
+
+    Regression guard: previous PR1 code unconditionally passed the 2.x order
+    even on osmnx 1.x, producing swapped lat/lon, a degenerate polygon, and
+    finally `cannot convert float NaN to integer` deep inside osmnx.
+    """
+    pytest.importorskip("osmnx")
+    from kernelcal.urban import city_graph as cg_mod
+
+    captured = {}
+    def capture(*args, **kwargs):
+        captured['bbox'] = kwargs.get('bbox', args[0] if args else None)
+        return _synthetic_building_gdf(n=4)
+
+    monkeypatch.setattr(cg_mod.ox, 'features_from_bbox', capture)
+
+    south, west, north, east = 37.0, -122.001, 37.002, -121.999
+
+    monkeypatch.setattr(cg_mod.ox, '__version__', '1.9.4', raising=False)
+    cg_mod.fetch_buildings_bbox(south, west, north, east, cache_dir=tmp_path / 'v1', force_refresh=True)
+    assert captured['bbox'] == (north, south, east, west), \
+        f'osmnx 1.x must receive (north, south, east, west); got {captured["bbox"]}'
+
+    monkeypatch.setattr(cg_mod.ox, '__version__', '2.0.0', raising=False)
+    cg_mod.fetch_buildings_bbox(south, west, north, east, cache_dir=tmp_path / 'v2', force_refresh=True)
+    assert captured['bbox'] == (west, south, east, north), \
+        f'osmnx 2.x must receive (west, south, east, north); got {captured["bbox"]}'
+
+
 def test_buildings_to_graph_from_bbox_empty_returns_none(monkeypatch, tmp_path):
     pytest.importorskip("osmnx")
     from kernelcal.urban import city_graph as cg_mod

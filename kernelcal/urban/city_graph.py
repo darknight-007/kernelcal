@@ -217,17 +217,29 @@ def fetch_buildings_bbox(
     print(f'    [OSM] Fetching buildings in bbox '
           f'({south:.4f},{west:.4f})–({north:.4f},{east:.4f}) …')
     ox.settings.timeout = timeout
+    # osmnx renamed the bbox-tuple convention between 1.x and 2.x:
+    #   * 1.x  : bbox=(north, south, east, west)   -- same order as legacy positional
+    #   * 2.x  : bbox=(left,  bottom, right, top)  -- i.e. (west, south, east, north)
+    # Pick the right tuple based on the installed major version. This avoids
+    # silently passing swapped lat/lon (which produces a degenerate polygon and
+    # later raises "cannot convert float NaN to integer" inside osmnx).
+    try:
+        _osmnx_major = int(str(getattr(ox, '__version__', '1.0')).split('.')[0])
+    except (ValueError, AttributeError):
+        _osmnx_major = 1
+    if _osmnx_major >= 2:
+        bbox_arg = (west, south, east, north)   # left, bottom, right, top
+    else:
+        bbox_arg = (north, south, east, west)   # legacy
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         try:
-            # Prefer the modern osmnx>=2 signature (bbox tuple); fall back
-            # to the legacy positional (north, south, east, west) form.
             try:
                 gdf = ox.features_from_bbox(
-                    bbox=(west, south, east, north),
-                    tags={'building': True},
+                    bbox=bbox_arg, tags={'building': True},
                 )
             except TypeError:
+                # Very old osmnx (<1.7) lacked the `bbox` kwarg.
                 gdf = ox.features_from_bbox(
                     north, south, east, west,
                     tags={'building': True},
