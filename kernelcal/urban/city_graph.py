@@ -98,7 +98,15 @@ class CityGraph:
     # descriptive; callers that care (e.g. HTTP analyzers) branch on it.
     graph_mode:  str = 'knn'
     # Optional road-aware metadata, populated only when graph_mode='road_knn'.
+    # Contains ``snap_node_ids`` (list[hashable], length == n buildings in
+    # ``positions``) so downstream consumers can reconstruct per-edge
+    # shortest-path polylines without re-snapping.
     road_meta:   dict = field(default_factory=dict, repr=False)
+    # Handle on the UTM-projected OSM road graph used to build the adjacency
+    # (populated only for ``graph_mode='road_knn'``). Not serialized /
+    # reprised; callers use this together with ``road_meta['snap_node_ids']``
+    # to reconstruct network paths for visualization.
+    raw_road_graph: object = field(default=None, repr=False)
 
 
 # ── disk cache helpers ─────────────────────────────────────────────────────
@@ -916,6 +924,11 @@ def buildings_to_graph_via_roads(
     np.fill_diagonal(reachable, False)
     n_reachable_pairs = int(reachable.sum())  # directed count (both orders)
 
+    # snap_node_ids is persisted on road_meta (rather than a separate field)
+    # so JSON-serializing road_meta for an HTTP response still yields a
+    # plain list. Node ids are whatever networkx gave us (usually int OSM
+    # ids, occasionally str after load_graphml round-trips), so the caller
+    # should treat them as opaque keys into raw_road_graph.
     road_meta = {
         'n_road_nodes':     int(G_roads.number_of_nodes()),
         'n_road_edges':     int(G_roads.number_of_edges()),
@@ -928,6 +941,7 @@ def buildings_to_graph_via_roads(
         'n_isolated_buildings': int(n_isolated),
         'n_reachable_pairs':    int(n_reachable_pairs // 2),
         'unique_snap_nodes':    int(len(set(snap_nodes.tolist()))),
+        'snap_node_ids':        [_node for _node in snap_nodes.tolist()],
     }
 
     return CityGraph(
@@ -944,6 +958,7 @@ def buildings_to_graph_via_roads(
         raw_gdf=gdf,
         graph_mode='road_knn',
         road_meta=road_meta,
+        raw_road_graph=G_roads,
     )
 
 

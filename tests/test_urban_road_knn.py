@@ -251,6 +251,17 @@ def test_buildings_to_graph_via_roads_end_to_end(monkeypatch, tmp_path):
     assert cg.road_meta.get('n_road_edges', 0) > 0
     assert 'snap_offset_m' in cg.road_meta
     assert cg.road_meta.get('unique_snap_nodes', 0) >= 1
+    # Path-reconstruction fixtures: snap ids and the raw road graph must
+    # be carried back on the CityGraph so downstream visualisers
+    # (e.g., DeepGIS-XR's _edges_and_polylines) can trace each adjacency
+    # edge through the OSM road graph without re-snapping.
+    snap_ids = cg.road_meta.get('snap_node_ids')
+    assert snap_ids is not None
+    assert len(snap_ids) == cg.positions.shape[0]
+    assert cg.raw_road_graph is not None
+    for nid in snap_ids:
+        assert nid in cg.raw_road_graph, \
+            f'snap node {nid!r} must exist in raw_road_graph'
 
 
 def test_buildings_to_graph_via_roads_falls_back_when_no_roads(
