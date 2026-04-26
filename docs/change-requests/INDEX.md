@@ -23,3 +23,12 @@ multi-PR proposals, sequencing decisions, and out-of-scope deferrals.
 | CR ID | Date | Status | Title |
 |---|---|---|---|
 | [2026-04-26-integration-spine-and-bookkeeping](./2026-04-26-integration-spine-and-bookkeeping.md) | 2026-04-26 | Accepted (with revisions) | Integration Spine and Bookkeeping |
+
+## PR scope docs
+
+When a CR's PR is large enough to need its own decomposition, that
+decomposition lives next to the CR as `pr-<letter>-scope.md`.
+
+| Doc | Parent CR | Status |
+|---|---|---|
+| [pr-a-scope.md](./pr-a-scope.md) | CR-2026-04-26 | Scoped, awaiting reviewer assignment |
