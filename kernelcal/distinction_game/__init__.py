@@ -106,8 +106,11 @@ from .factor_graph import (
     Factor,
     FactorGraph,
     PairwiseAssociationFactor,
+    PairwiseParentChildFactor,
     PairwiseSpatialFactor,
     PairwiseTemporalFactor,
+    UnaryClassPriorFactor,
+    UnaryGroundElevationFactor,
     UnaryPerceptualFactor,
     Variable,
     loopy_bp,
@@ -117,6 +120,19 @@ from .collapse import (
     collapse_scene_graphs,
     data_associate,
     temporal_links,
+)
+from .city_priors import (
+    CityEntity,
+    CityPriorSource,
+    CityPriorStack,
+    DEMGroundPriorSource,
+    LandCoverPriorSource,
+    OSMBuildingPriorSource,
+    OSMRoadPriorSource,
+    ParentChildPriorSource,
+    PHX_PARENT_CHILD_COMPATIBLE,
+    PHX_PARENT_CHILD_INCOMPATIBLE,
+    entities_from_fused_scene_graph,
 )
 from .geometry import (
     # Superquadric core
@@ -224,6 +240,21 @@ __all__ = [
     "collapse_scene_graphs",
     "data_associate",
     "temporal_links",
+    # PR-7 city priors + new factor types
+    "PairwiseParentChildFactor",
+    "UnaryClassPriorFactor",
+    "UnaryGroundElevationFactor",
+    "CityEntity",
+    "CityPriorSource",
+    "CityPriorStack",
+    "DEMGroundPriorSource",
+    "LandCoverPriorSource",
+    "OSMBuildingPriorSource",
+    "OSMRoadPriorSource",
+    "ParentChildPriorSource",
+    "PHX_PARENT_CHILD_COMPATIBLE",
+    "PHX_PARENT_CHILD_INCOMPATIBLE",
+    "entities_from_fused_scene_graph",
     # PR-5 geometry surface (Superquadric primitives + fit + codec)
     "EPS_MIN",
     "EPS_MAX",

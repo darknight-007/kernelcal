@@ -225,6 +225,198 @@ class PairwiseTemporalFactor(Factor):
         )
 
 
+# ---------------------------------------------------------------------------
+# PR-7: city-prior factor types
+# ---------------------------------------------------------------------------
+
+
+class UnaryClassPriorFactor(Factor):
+    """Push a variable toward a target class (or a small set of classes).
+
+    This is the workhorse factor for *external* evidence sources: an OSM
+    polygon hit, a land-cover raster value, a road-distance prior, etc.
+    Concrete city-prior sources should produce one of these per
+    relevant entity.
+
+    Parameters
+    ----------
+    variable
+        The categorical variable id.
+    target_class_index
+        Either a single ``int`` index in ``[0, n_states)`` or a sequence
+        of indices that should share the bonus (e.g. building-like
+        classes ``{building}``, vegetation ``{tree, vegetation_other}``).
+    n_states
+        Taxonomy cardinality.
+    bonus
+        Log-likelihood bonus on the target class(es) relative to the
+        rest.  ``bonus = log(p_target / p_other)`` where p_target is
+        the probability the source assigns to the target class.  Must
+        be ``>= 0``; pass 0 for an inert factor (useful for
+        ablation runs that want to keep graph topology stable).
+    """
+
+    def __init__(
+        self,
+        variable: VarId,
+        *,
+        target_class_index,
+        n_states: int,
+        bonus: float = 1.0,
+        name: Optional[str] = None,
+        metadata: Optional[Mapping[str, object]] = None,
+    ) -> None:
+        if n_states < 2:
+            raise ValueError("UnaryClassPriorFactor requires n_states >= 2")
+        if bonus < 0.0:
+            raise ValueError("bonus must be >= 0 (use a different factor for penalties)")
+        if isinstance(target_class_index, (list, tuple, set, np.ndarray)):
+            targets = sorted({int(i) for i in target_class_index})
+        else:
+            targets = [int(target_class_index)]
+        if not targets:
+            raise ValueError("target_class_index must contain at least one index")
+        for t in targets:
+            if not 0 <= t < n_states:
+                raise ValueError(
+                    f"target index {t} out of range [0, {n_states})"
+                )
+        log_p = np.zeros(n_states, dtype=np.float64)
+        for t in targets:
+            log_p[t] = float(bonus)
+        super().__init__(
+            variables=(variable,),
+            log_table=log_p,
+            name=name or f"class_prior:{variable}",
+            metadata={
+                "target_class_index": list(targets),
+                "bonus": float(bonus),
+                **(dict(metadata) if metadata else {}),
+            },
+        )
+
+
+class UnaryGroundElevationFactor(Factor):
+    """Soft binary prior on whether an entity sits at ground level.
+
+    Many semantic classes correlate strongly with z-relative-to-ground:
+    roads / pavement / bare-ground hug the DEM; tall buildings sit
+    *on* the DEM but extend upward; airborne classes (none in PHX_v0,
+    but useful for future taxonomies) live above it.
+
+    The factor reads two arrays per taxonomy:
+
+    * ``ground_class_indices`` -- classes whose entities should have
+      base-z near the DEM surface.  Hit -> bonus.
+    * ``elevated_class_indices`` -- classes whose entities should sit
+      *above* the DEM.  Hit -> bonus.
+
+    Where "hit" is determined by the producer-supplied
+    ``base_above_dem_m``: a real-valued elevation of the entity's
+    *base* above the DEM-implied ground.  Ground hit if
+    ``|base_above_dem_m| <= ground_tol_m``; elevated hit if
+    ``base_above_dem_m > ground_tol_m``; otherwise neither (the factor
+    just lifts up its prior toward the better-fitting half).
+
+    The factor is intentionally one-sided: we add a positive bonus to
+    the matching half, leaving the other half at 0 in log-prob.
+    """
+
+    def __init__(
+        self,
+        variable: VarId,
+        *,
+        n_states: int,
+        base_above_dem_m: float,
+        ground_class_indices: Sequence[int],
+        elevated_class_indices: Sequence[int],
+        ground_tol_m: float = 0.5,
+        bonus: float = 1.0,
+        name: Optional[str] = None,
+    ) -> None:
+        if n_states < 2:
+            raise ValueError("UnaryGroundElevationFactor requires n_states >= 2")
+        if ground_tol_m < 0.0:
+            raise ValueError("ground_tol_m must be >= 0")
+        if bonus < 0.0:
+            raise ValueError("bonus must be >= 0")
+        log_p = np.zeros(n_states, dtype=np.float64)
+        is_ground = abs(float(base_above_dem_m)) <= float(ground_tol_m)
+        is_elevated = float(base_above_dem_m) > float(ground_tol_m)
+        if is_ground:
+            for t in ground_class_indices:
+                if 0 <= int(t) < n_states:
+                    log_p[int(t)] = float(bonus)
+        elif is_elevated:
+            for t in elevated_class_indices:
+                if 0 <= int(t) < n_states:
+                    log_p[int(t)] = float(bonus)
+        super().__init__(
+            variables=(variable,),
+            log_table=log_p,
+            name=name or f"ground:{variable}",
+            metadata={
+                "base_above_dem_m": float(base_above_dem_m),
+                "ground_tol_m": float(ground_tol_m),
+                "bonus": float(bonus),
+                "is_ground": bool(is_ground),
+                "is_elevated": bool(is_elevated),
+            },
+        )
+
+
+class PairwiseParentChildFactor(Factor):
+    """Class-pair compatibility prior between a parent SQ and its child.
+
+    The earth_rover and SceneGraph fitter both expose a ``parent_id``
+    relation -- e.g. a tree's crown ellipsoid carries the trunk
+    cylinder as its parent.  This factor encodes plausibility of
+    class pairs ``(c_parent, c_child)`` directly: pairs in
+    ``compatible_pairs`` get ``+log_compatible``, pairs in
+    ``incompatible_pairs`` get ``+log_incompatible`` (both can be
+    negative for hard penalties), all others get ``0``.
+
+    Symmetry is the caller's responsibility: if you want
+    ``(trunk -> crown)`` only, list only that ordered pair.  If you
+    also want ``(crown -> trunk)``, list both.
+    """
+
+    def __init__(
+        self,
+        parent: VarId,
+        child: VarId,
+        *,
+        n_states: int,
+        compatible_pairs: Sequence[Tuple[int, int]] = (),
+        incompatible_pairs: Sequence[Tuple[int, int]] = (),
+        log_compatible: float = 1.0,
+        log_incompatible: float = -1.0,
+        name: Optional[str] = None,
+    ) -> None:
+        if n_states < 2:
+            raise ValueError("PairwiseParentChildFactor requires n_states >= 2")
+        table = np.zeros((n_states, n_states), dtype=np.float64)
+        for p, c in compatible_pairs:
+            pi, ci = int(p), int(c)
+            if 0 <= pi < n_states and 0 <= ci < n_states:
+                table[pi, ci] += float(log_compatible)
+        for p, c in incompatible_pairs:
+            pi, ci = int(p), int(c)
+            if 0 <= pi < n_states and 0 <= ci < n_states:
+                table[pi, ci] += float(log_incompatible)
+        super().__init__(
+            variables=(parent, child),
+            log_table=table,
+            name=name or f"parent_child:{parent}:{child}",
+            metadata={
+                "compatible_pairs": [tuple(int(x) for x in pq) for pq in compatible_pairs],
+                "incompatible_pairs": [tuple(int(x) for x in pq) for pq in incompatible_pairs],
+                "log_compatible": float(log_compatible),
+                "log_incompatible": float(log_incompatible),
+            },
+        )
+
+
 @dataclass
 class FactorGraph:
     variables: Dict[VarId, Variable] = field(default_factory=dict)
@@ -361,8 +553,11 @@ __all__ = [
     "Factor",
     "FactorGraph",
     "PairwiseAssociationFactor",
+    "PairwiseParentChildFactor",
     "PairwiseSpatialFactor",
     "PairwiseTemporalFactor",
+    "UnaryClassPriorFactor",
+    "UnaryGroundElevationFactor",
     "UnaryPerceptualFactor",
     "VarId",
     "Variable",
