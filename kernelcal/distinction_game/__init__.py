@@ -161,6 +161,19 @@ from .geometry import (
     gndvi,
     ndre,
     ndvi,
+    # Frames (PR-5.7)
+    FrameSpec,
+    ecef_to_enu,
+    ecef_to_geodetic,
+    enu_to_ecef,
+    geodetic_to_ecef,
+    geodetic_to_utm,
+    transform_point,
+    transform_pose,
+    transform_superquadric,
+    transform_superquadrics,
+    utm_to_geodetic,
+    utm_zone_for,
 )
 
 __all__ = [
@@ -250,4 +263,17 @@ __all__ = [
     "ndre",
     "gndvi",
     "evi",
+    # PR-5.7 coordinate frames
+    "FrameSpec",
+    "geodetic_to_ecef",
+    "ecef_to_geodetic",
+    "ecef_to_enu",
+    "enu_to_ecef",
+    "geodetic_to_utm",
+    "utm_to_geodetic",
+    "utm_zone_for",
+    "transform_point",
+    "transform_pose",
+    "transform_superquadric",
+    "transform_superquadrics",
 ]
