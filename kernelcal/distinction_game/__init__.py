@@ -68,8 +68,11 @@ from .q_s import (
     available_sources,
 )
 from .kernel_mix import (
+    JointFitResult,
     KernelMixFit,
     fit_kernel_mix,
+    fit_kernel_mix_em,
+    manual_lambdas,
     uniform_lambdas,
 )
 from .scene_graph import (
@@ -78,6 +81,42 @@ from .scene_graph import (
     SceneGraph,
     Viewport,
     build_scene_graph,
+)
+from .q_s_fit import (
+    DEFAULT_OSM_ANCHOR_SOURCES,
+    QsFitResult,
+    bayesian_refit_q_s,
+    bayesian_refit_q_s_table,
+    count_evidence_triples,
+    evidence_triples_from_many_scene_graphs,
+    evidence_triples_from_scene_graph,
+)
+from .spectral import (
+    cg_node_index_map,
+    graph_smooth_posteriors,
+    posteriors_array_from_scene_graph,
+    spectral_consistency_score,
+)
+from .fit_pipeline import (
+    DistinctionGameFit,
+    fit_distinction_game,
+)
+from .factor_graph import (
+    BPResult,
+    Factor,
+    FactorGraph,
+    PairwiseAssociationFactor,
+    PairwiseSpatialFactor,
+    PairwiseTemporalFactor,
+    UnaryPerceptualFactor,
+    Variable,
+    loopy_bp,
+)
+from .collapse import (
+    FusedSceneGraph,
+    collapse_scene_graphs,
+    data_associate,
+    temporal_links,
 )
 
 __all__ = [
@@ -90,11 +129,42 @@ __all__ = [
     "default_q_s_table",
     "available_sources",
     "KernelMixFit",
+    "JointFitResult",
     "fit_kernel_mix",
+    "fit_kernel_mix_em",
+    "manual_lambdas",
     "uniform_lambdas",
     "SceneNode",
     "SceneEdge",
     "SceneGraph",
     "Viewport",
     "build_scene_graph",
+    # PR-3 surface
+    "DEFAULT_OSM_ANCHOR_SOURCES",
+    "QsFitResult",
+    "bayesian_refit_q_s",
+    "bayesian_refit_q_s_table",
+    "count_evidence_triples",
+    "evidence_triples_from_many_scene_graphs",
+    "evidence_triples_from_scene_graph",
+    "graph_smooth_posteriors",
+    "spectral_consistency_score",
+    "cg_node_index_map",
+    "posteriors_array_from_scene_graph",
+    "DistinctionGameFit",
+    "fit_distinction_game",
+    # PR-4 factor graph + collapse surface
+    "BPResult",
+    "Factor",
+    "FactorGraph",
+    "PairwiseAssociationFactor",
+    "PairwiseSpatialFactor",
+    "PairwiseTemporalFactor",
+    "UnaryPerceptualFactor",
+    "Variable",
+    "loopy_bp",
+    "FusedSceneGraph",
+    "collapse_scene_graphs",
+    "data_associate",
+    "temporal_links",
 ]

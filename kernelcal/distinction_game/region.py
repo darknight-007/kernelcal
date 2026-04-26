@@ -326,6 +326,48 @@ class KernelClaim:
             out["image_size"] = list(self.image_size)
         return out
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "KernelClaim":
+        """Reconstruct a :class:`KernelClaim` from its :meth:`to_dict`
+        round-trip form.
+
+        Tolerates absent geometry fields (``polygon``/``bbox``/``area``)
+        by defaulting to zero — useful when reading SceneGraph payloads
+        whose claims may have been thinned for storage. PR-3 fits use
+        the score and native label, not the geometry, so the empty
+        defaults are harmless on that path.
+        """
+        polygon = payload.get("polygon")
+        bbox = payload.get("bbox")
+        area = float(payload.get("area", 0.0) or 0.0)
+        if polygon is None:
+            polygon_arr = np.zeros((0, 2), dtype=np.float64)
+        else:
+            polygon_arr = np.asarray(polygon, dtype=np.float64)
+        if bbox is None:
+            bbox_t: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        else:
+            bbox_t = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        geo_polygon = payload.get("geo_polygon")
+        geo_polygon_arr = (
+            np.asarray(geo_polygon, dtype=np.float64) if geo_polygon is not None else None
+        )
+        image_size = payload.get("image_size")
+        image_size_t = tuple(image_size) if image_size is not None else None
+        return cls(
+            source_id=str(payload["source_id"]),
+            native_label=str(payload["native_label"]),
+            score=float(payload.get("score", 0.0) or 0.0),
+            polygon=polygon_arr,
+            bbox=bbox_t,
+            area=area,
+            geo_polygon=geo_polygon_arr,
+            mask_rle=payload.get("mask_rle"),
+            image_size=image_size_t,
+            attributes=dict(payload.get("attributes") or {}),
+            id=str(payload.get("id") or f"c-{uuid.uuid4().hex[:12]}"),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Convenience: bulk filtering / conversion
