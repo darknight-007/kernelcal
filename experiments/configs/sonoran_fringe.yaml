@@ -1,0 +1,10 @@
+# Sonoran fringe viewport for the live-OSM PR-C run.
+# Cave Creek / Phoenix Mountain Preserve fringe -- organic, branching
+# street structure.
+south: 33.55
+west: -112.10
+north: 33.59
+east: -112.06
+k: 8
+n_max: 1500
+sigma_frac: 0.05

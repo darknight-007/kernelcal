@@ -1,0 +1,11 @@
+# Synthetic grid viewport for PR-C (CR-2026-04-26).
+# Manhattan-style rectilinear lattice: 8x8 blocks at 80 m spacing.
+# Mirrors the Phoenix-grid orthogonal block structure.
+layout: grid
+n_blocks_x: 8
+n_blocks_y: 8
+block_size_m: 80.0
+jitter_m: 5.0
+seed: 42
+k: 8
+sigma_frac: 0.05

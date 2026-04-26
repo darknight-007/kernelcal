@@ -1,0 +1,9 @@
+# Tempe grid viewport for the live-OSM PR-C run.
+# Phoenix-grid orthogonal block structure; ASU Tempe campus + Mill Avenue.
+south: 33.420
+west: -111.945
+north: 33.460
+east: -111.905
+k: 8
+n_max: 1500
+sigma_frac: 0.05

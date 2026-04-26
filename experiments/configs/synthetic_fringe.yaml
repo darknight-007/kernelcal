@@ -1,0 +1,14 @@
+# Synthetic fringe viewport for PR-C (CR-2026-04-26).
+# 64 buildings clustered around 6 seed points; sparse branching road
+# network with 3 dead-end branches per seed.  Mirrors organic fringe
+# fabric (Cave Creek / Phoenix Mountain Preserve fringe).
+layout: fringe
+n_buildings: 64
+n_seeds: 6
+scale_m: 800.0
+cluster_sigma_m: 25.0
+branch_length_m: 120.0
+n_branches_per_seed: 3
+seed: 42
+k: 8
+sigma_frac: 0.05
