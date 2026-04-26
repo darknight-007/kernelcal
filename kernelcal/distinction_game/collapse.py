@@ -9,6 +9,7 @@ entity from all contributing claims plus spatial consistency factors.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
@@ -27,6 +28,8 @@ from .q_s import ConfusionMatrix
 from .region import KernelClaim, bbox_iou
 from .taxonomy import Taxonomy
 
+
+log = logging.getLogger(__name__)
 
 NodeRef = Tuple[int, str]
 
@@ -97,17 +100,30 @@ def _grid_candidate_pairs(
     bboxes: Mapping[NodeRef, Optional[Tuple[float, float, float, float]]],
     *,
     cell_size: float,
+    pad: float = 0.0,
 ) -> List[Tuple[NodeRef, NodeRef]]:
-    """Return candidate bbox pairs sharing a coarse spatial grid cell."""
+    """Return candidate bbox pairs sharing a coarse spatial grid cell.
+
+    ``pad`` expands every bbox by this radius before computing the cells
+    it occupies. Without padding a degenerate (zero-area) bbox sitting
+    just on the wrong side of a cell boundary can never share a cell
+    with a near-twin ~``pad`` away. With ``pad >= centroid_eps`` any two
+    points within the centroid-distance threshold are guaranteed to
+    co-occupy at least one cell, so the IoU/centroid test downstream is
+    actually given a chance to fire.
+    """
     cell_size = max(float(cell_size), 1e-9)
+    pad = max(float(pad), 0.0)
     cells: Dict[Tuple[int, int], List[NodeRef]] = {}
     for ref in refs:
         bbox = bboxes.get(ref)
         if bbox is None:
             continue
         x1, y1, x2, y2 = bbox
-        ix1, ix2 = int(np.floor(x1 / cell_size)), int(np.floor(x2 / cell_size))
-        iy1, iy2 = int(np.floor(y1 / cell_size)), int(np.floor(y2 / cell_size))
+        ix1 = int(np.floor((x1 - pad) / cell_size))
+        ix2 = int(np.floor((x2 + pad) / cell_size))
+        iy1 = int(np.floor((y1 - pad) / cell_size))
+        iy2 = int(np.floor((y2 + pad) / cell_size))
         # Guard against pathological giant boxes filling the world grid.
         if (ix2 - ix1 + 1) * (iy2 - iy1 + 1) > 512:
             ix1 = ix2 = int(np.floor(((x1 + x2) * 0.5) / cell_size))
@@ -228,10 +244,12 @@ def data_associate(
     # inside the same SceneGraph row.
     geo_bboxes = {ref: _node_geo_bbox(node) for ref, node in nodes_by_ref.items()}
     img_bboxes = {ref: _node_bbox(node) for ref, node in nodes_by_ref.items()}
+    geo_cell_size = max(centroid_eps * 4.0, 0.001)
     for a, b in _grid_candidate_pairs(
         refs,
         geo_bboxes,
-        cell_size=max(centroid_eps * 4.0, 0.001),
+        cell_size=geo_cell_size,
+        pad=centroid_eps,
     ):
         ga = geo_bboxes.get(a)
         gb = geo_bboxes.get(b)
@@ -245,7 +263,9 @@ def data_associate(
     for ref in refs:
         by_row.setdefault(ref[0], []).append(ref)
     for row_refs in by_row.values():
-        for a, b in _grid_candidate_pairs(row_refs, img_bboxes, cell_size=0.05):
+        for a, b in _grid_candidate_pairs(
+            row_refs, img_bboxes, cell_size=0.05, pad=0.0,
+        ):
             ia = img_bboxes.get(a)
             ib = img_bboxes.get(b)
             if ia is not None and ib is not None and bbox_iou(ia, ib) >= iou_thresh:
@@ -336,22 +356,40 @@ def collapse_scene_graphs(
         centroid_eps=centroid_eps,
     )
     t_links = temporal_links(sg_list, clusters)
+
+    # Build a single (sg_idx, node_id) -> node lookup so cluster
+    # construction is O(total_refs) instead of O(refs * nodes_per_sg).
+    nodes_by_ref: Dict[NodeRef, Mapping[str, Any]] = {}
+    for sg_idx, sg in enumerate(sg_list):
+        for n_i, node in enumerate(sg.get("nodes") or []):
+            nodes_by_ref[(sg_idx, _node_id(node, sg_idx, n_i))] = node
+
     ref_to_cluster: Dict[NodeRef, str] = {}
     cluster_nodes: Dict[str, List[Mapping[str, Any]]] = {}
     cluster_claims: Dict[str, List[KernelClaim]] = {}
+    cluster_members_by_cid: Dict[str, List[NodeRef]] = {}
+    n_unknown_source_claims = 0
+    unknown_sources: set = set()
+    known_source_ids = set(q_s_table) | set(lam)
     for idx, cluster in enumerate(clusters):
         cid = f"w-{idx:06d}"
         cluster_nodes[cid] = []
         cluster_claims[cid] = []
+        cluster_members_by_cid[cid] = list(cluster)
         for ref in cluster:
-            sg_idx, node_id = ref
             ref_to_cluster[ref] = cid
-            node = next(
-                n for n_i, n in enumerate(sg_list[sg_idx].get("nodes") or [])
-                if _node_id(n, sg_idx, n_i) == node_id
-            )
+            node = nodes_by_ref.get(ref)
+            if node is None:
+                # Defensive: data_associate produced a ref that the
+                # current sg_list can no longer resolve. Skip rather
+                # than crash so a partial fuse still completes.
+                continue
             cluster_nodes[cid].append(node)
-            cluster_claims[cid].extend(_claims_from_node(node))
+            for claim in _claims_from_node(node):
+                if claim.source_id not in known_source_ids:
+                    n_unknown_source_claims += 1
+                    unknown_sources.add(claim.source_id)
+                cluster_claims[cid].append(claim)
 
     graph = FactorGraph()
     for cid in cluster_nodes:
@@ -364,10 +402,10 @@ def collapse_scene_graphs(
             taxonomy=taxonomy,
         ))
 
-    edge_seen = set()
     edge_skipped_degree_cap = 0
     degree_by_cluster: Dict[str, int] = {cid: 0 for cid in cluster_nodes}
     out_edges: List[Dict[str, Any]] = []
+    edges_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for sg_idx, sg in enumerate(sg_list):
         node_refs = {
             _node_id(node, sg_idx, node_idx): (sg_idx, _node_id(node, sg_idx, node_idx))
@@ -383,39 +421,53 @@ def collapse_scene_graphs(
             if a is None or b is None or a == b:
                 continue
             key = tuple(sorted((a, b)))
-            weight = float(edge.get("weight", 1.0) or 1.0)
-            if key not in edge_seen:
-                if spatial_degree_cap is not None and spatial_degree_cap >= 0:
-                    if (
-                        degree_by_cluster.get(key[0], 0) >= spatial_degree_cap
-                        or degree_by_cluster.get(key[1], 0) >= spatial_degree_cap
-                    ):
-                        edge_skipped_degree_cap += 1
-                        continue
-                graph.add_factor(PairwiseSpatialFactor(
-                    key[0],
-                    key[1],
-                    taxonomy=taxonomy,
-                    weight=weight,
-                    beta=beta_spatial,
-                ))
-                out_edges.append({
-                    "id": f"e-{uuid.uuid4().hex[:12]}",
-                    "source": key[0],
-                    "target": key[1],
-                    "relation": edge.get("relation", "adjacent"),
+            raw_weight = edge.get("weight")
+            weight = 1.0 if raw_weight is None else float(raw_weight)
+            existing = edges_by_key.get(key)
+            if existing is not None:
+                existing["attributes"]["merged_from"].append({
+                    "scene_graph_index": sg_idx,
+                    "source": edge.get("source"),
+                    "target": edge.get("target"),
                     "weight": weight,
-                    "attributes": {
-                        "merged_from": [{
-                            "scene_graph_index": sg_idx,
-                            "source": edge.get("source"),
-                            "target": edge.get("target"),
-                        }],
-                    },
                 })
-                edge_seen.add(key)
-                degree_by_cluster[key[0]] = degree_by_cluster.get(key[0], 0) + 1
-                degree_by_cluster[key[1]] = degree_by_cluster.get(key[1], 0) + 1
+                # Keep the maximum observed weight as the representative
+                # but record every occurrence for provenance/audit.
+                existing["weight"] = max(float(existing["weight"]), weight)
+                continue
+            if spatial_degree_cap is not None and spatial_degree_cap >= 0:
+                if (
+                    degree_by_cluster.get(key[0], 0) >= spatial_degree_cap
+                    or degree_by_cluster.get(key[1], 0) >= spatial_degree_cap
+                ):
+                    edge_skipped_degree_cap += 1
+                    continue
+            graph.add_factor(PairwiseSpatialFactor(
+                key[0],
+                key[1],
+                taxonomy=taxonomy,
+                weight=weight,
+                beta=beta_spatial,
+            ))
+            out_edge = {
+                "id": f"e-{uuid.uuid4().hex[:12]}",
+                "source": key[0],
+                "target": key[1],
+                "relation": edge.get("relation", "adjacent"),
+                "weight": weight,
+                "attributes": {
+                    "merged_from": [{
+                        "scene_graph_index": sg_idx,
+                        "source": edge.get("source"),
+                        "target": edge.get("target"),
+                        "weight": weight,
+                    }],
+                },
+            }
+            out_edges.append(out_edge)
+            edges_by_key[key] = out_edge
+            degree_by_cluster[key[0]] = degree_by_cluster.get(key[0], 0) + 1
+            degree_by_cluster[key[1]] = degree_by_cluster.get(key[1], 0) + 1
 
     temporal_factor_count = 0
     temporal_seen = set()
@@ -466,7 +518,7 @@ def collapse_scene_graphs(
                     ),
                     "node_id": node_id,
                 }
-                for sg_idx, node_id in clusters[int(cid.split("-")[1])]
+                for sg_idx, node_id in cluster_members_by_cid[cid]
             ],
         })
 
@@ -486,6 +538,15 @@ def collapse_scene_graphs(
         },
         "n_temporal_links": len(t_links),
     }
+    if unknown_sources:
+        log.warning(
+            "collapse_scene_graphs: %d claim(s) reference sources without "
+            "Q_s or \u03bb (sources=%s); they will not contribute to the "
+            "fused posterior. Re-run fit_distinction_game with these "
+            "sources included to use them.",
+            n_unknown_source_claims,
+            sorted(unknown_sources),
+        )
     diagnostics = {
         "n_iter": bp.n_iter,
         "converged": bp.converged,
@@ -495,8 +556,10 @@ def collapse_scene_graphs(
         "n_variables": len(graph.variables),
         "n_factors": len(graph.factors),
         "n_temporal_factors": temporal_factor_count,
-        "n_spatial_edges_used": len(edge_seen),
+        "n_spatial_edges_used": len(edges_by_key),
         "n_spatial_edges_skipped_degree_cap": edge_skipped_degree_cap,
+        "n_unknown_source_claims": n_unknown_source_claims,
+        "unknown_sources": sorted(unknown_sources),
     }
     return FusedSceneGraph(
         nodes=out_nodes,
