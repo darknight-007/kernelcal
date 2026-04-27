@@ -4,7 +4,7 @@
 |---|---|
 | CR | [CR-2026-04-26-integration-spine-and-bookkeeping](./2026-04-26-integration-spine-and-bookkeeping.md) |
 | PR | PR-A |
-| Status | A.0 complete (committed); A.1–A.5 pending |
+| Status | A.0, A.1 complete (committed); A.2–A.5 pending |
 | Estimated effort | 1.5–2 weeks (revised on review of CR), ~1800 LOC including tests |
 | Reviewer | Owner of `kernelcal.fluid` (TBD) |
 
@@ -170,18 +170,46 @@ vectorise) or running at `dt < 1e-13` (which doesn't terminate).
 A0d above is the honest replacement: same fixed point, not same
 trajectory.
 
-### A.1 `kernelcal.urban.adapter.to_fluid_graph` (unchanged from CR)
+### A.1 `kernelcal.urban.adapter.to_fluid_graph` — **DONE**
 
-Files: `kernelcal/urban/adapter.py` (~80 LOC), `tests/test_urban_to_fluid_adapter.py` (~120 LOC).
+Files: `kernelcal/urban/adapter.py` (~155 LOC, shipped),
+`tests/test_urban_to_fluid_adapter.py` (~330 LOC, 18 tests, all
+pass).
 
-Effort: ~0.5 day.
+Effort: shipped in ~1 hour; the actual time went to one
+non-trivial design call described below, not the mechanical adapter
+code.
 
-Adapter is mostly mechanical.  Edge-length convention: ``edge_lengths
-= 1 / max(W_ij, eps)`` so high-weight edges become short paths.
+Edge-length convention as scoped: ``edge_lengths = 1 / max(W_ij,
+weight_floor)`` with ``weight_floor=1e-6`` default; high-weight
+(close in substrate) edges produce short fluid-domain edges.
 
-Acceptance criterion **A1**: every CityGraph from
-`tests/test_urban_road_knn.py` round-trips through `to_fluid_graph`
-into a `FluidGraph` with the same connected-component count.
+Acceptance criterion **A1** as shipped: every CityGraph round-trips
+through ``to_fluid_graph`` into a ``FluidGraph`` with the same
+**topological** β₀ (count of connected components of the ``W > 0``
+adjacency).  The original spec said "same connected-component
+count" without specifying topological vs spectral; in
+``road_knn`` mode these can legitimately differ when two clusters
+are bridged by a numerically tiny weight that is below the
+spectral ``betti_zero`` tolerance but still represents a valid
+graph edge.  The adapter, by construction, creates exactly one
+edge per positive ``W_ij``, so topological β₀ is preserved
+exactly.  The companion test
+``test_topological_and_spectral_can_diverge_in_road_knn`` documents
+the divergence and pins the inequality (spectral β₀ ≥ topological
+β₀) so the choice is auditable.
+
+Helper exported alongside the adapter:
+:func:`fluid_graph_connected_components` builds the topological β₀
+of any FluidGraph from its ``adjacency_mask`` via
+``scipy.sparse.csgraph.connected_components``.  PR-B's ledger
+closure test and PR-A.5's pipeline smoke can reuse it without
+re-deriving the adjacency.
+
+End-to-end smoke included in the test file: a grid CityGraph and
+a fringe CityGraph each round-trip into a (FluidGraph,
+SparseFluidGraph) pair and run ``simulate_kernel_fluid_sparse`` for
+20–50 steps with mass conservation at machine epsilon.
 
 ### A.2 Multi-component lift (UPDATED to depend on A.0)
 

@@ -40,6 +40,10 @@ from .synthetic import (
     make_grid_road_segments,
     synthetic_city_graph,
 )
+from .adapter import (
+    fluid_graph_connected_components,
+    to_fluid_graph,
+)
 
 __all__ = [
     'CityGraph',
@@ -62,4 +66,7 @@ __all__ = [
     'make_grid_layout',
     'make_grid_road_segments',
     'synthetic_city_graph',
+    # PR-A.1 CityGraph -> FluidGraph adapter
+    'fluid_graph_connected_components',
+    'to_fluid_graph',
 ]
