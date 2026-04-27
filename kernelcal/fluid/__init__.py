@@ -27,6 +27,13 @@ from .sparse import (
     node_signed_inflow,
     simulate_kernel_fluid_sparse,
 )
+from .multicomponent import (
+    MultiComponentFluidConfig,
+    MultiComponentLandscape,
+    MultiComponentResult,
+    make_concentrated_initial_state,
+    simulate_multicomponent_fluid,
+)
 
 
 def __getattr__(name: str):
@@ -54,5 +61,11 @@ __all__ = [
     "edge_laplacian_smoothing",
     "node_signed_inflow",
     "simulate_kernel_fluid_sparse",
+    # PR-A.2 multi-component fluid lift
+    "MultiComponentFluidConfig",
+    "MultiComponentLandscape",
+    "MultiComponentResult",
+    "make_concentrated_initial_state",
+    "simulate_multicomponent_fluid",
 ]
 

@@ -4,7 +4,7 @@
 |---|---|
 | CR | [CR-2026-04-26-integration-spine-and-bookkeeping](./2026-04-26-integration-spine-and-bookkeeping.md) |
 | PR | PR-A |
-| Status | A.0, A.1 complete (committed); A.2–A.5 pending |
+| Status | A.0, A.1, A.2 complete (committed); A.3–A.5 pending |
 | Estimated effort | 1.5–2 weeks (revised on review of CR), ~1800 LOC including tests |
 | Reviewer | Owner of `kernelcal.fluid` (TBD) |
 
@@ -211,35 +211,129 @@ a fringe CityGraph each round-trip into a (FluidGraph,
 SparseFluidGraph) pair and run ``simulate_kernel_fluid_sparse`` for
 20–50 steps with mass conservation at machine epsilon.
 
-### A.2 Multi-component lift (UPDATED to depend on A.0)
+### A.2 Multi-component lift — **DONE**
 
-Files: `kernelcal/fluid/multicomponent.py` (~450 LOC),
-`tests/test_multicomponent_fluid.py` (~250 LOC).
+Files: `kernelcal/fluid/multicomponent.py` (~480 LOC, shipped),
+`tests/test_multicomponent_fluid.py` (~530 LOC, 20 tests, all
+pass).
 
-Effort: ~3 days.  Depends on A.0 (sparse solver) being merged.
+Effort: shipped in ~1 day on top of the scoped 3-day budget.  A.0's
+sparse-Laplacian foundation made the broadcast lift mostly
+mechanical; the substantive work was getting the simplex projection
++ ledger contract right.  Two design refinements were made on
+review of the implementation against the spec; both are recorded
+here so the spec and shipped code agree.
 
-State shapes:
+State shapes (as scoped):
 
 * `rho` of shape `(C, n)` with `C = len(taxonomy.categories)`.
-* `rho_unknown` of shape `(n,)`.
-* `u` of shape `(C, E)`.
-* `phi` (per-category) of shape `(C, n)`.
+* `rho_unknown` of shape `(n,)` -- "Goedel-slot" reservoir.
+* `u` of shape `(C, E)` -- per-category, per-canonical-edge oriented
+  velocity.  Note: ``rho_unknown`` does **not** have its own
+  per-edge velocity (see refinement 1 below).
+* `phi` of shape `(C, n)` -- per-category potential.
 
-Per-step inner loop is *exactly* the A.0 loop, broadcast over
-category axis.  No Python `for c in range(C)` — broadcast in numpy.
+Per-step inner loop is the A.0 loop broadcast over the category
+axis via scipy.sparse's ``__rmatmul__``: gradients
+``(p @ D.T) / ell``, edge-Laplacian ``(nu @ D.T) - 2u``, continuity
+``F @ D``.  No Python ``for c in range(C)`` anywhere in the inner
+loop.
 
-Simplex projection: at each step, project `(rho, rho_unknown)` onto
-the simplex `sum_c rho_c + rho_unknown = 1` per node via
-Bregman/KL projection.  Drift between pre-projection and
-post-projection is the genuine `simplex_projection` event PR-B logs;
-this is *not* the silent renormalisation hack of the legacy solver.
+1. **Unknown channel does not flow** (added on implementation
+   review).  The CR text said ``rho_unknown`` is part of the
+   simplex but did not say whether it has its own velocity.  We
+   chose **no flow**: ``rho_unknown`` evolves only via the per-node
+   simplex projection, not via a continuity equation.  Rationale:
+   (a) the unknown channel is a reservoir for unattributable mass
+   in the FN-102 sense; giving it a flow field would imply we have
+   a "physics of ignorance" we don't have; (b) without a velocity
+   field for the unknown channel, ``u`` is ``(C, E)`` not
+   ``(C+1, E)``, halving momentum-state size for free; (c) the
+   simplex projection still redistributes ``rho_unknown`` over
+   time when the categories' fluxes diverge non-uniformly, so the
+   reservoir is not frozen.
 
-Acceptance criteria:
+2. **Simplex projection breaks per-category mass; closure
+   identity is the testable invariant** (added on implementation
+   review).  The CR said ``A3 mass error per category < 1e-7 over
+   1000 steps``.  This is **not achievable** with the per-node
+   KL/Bregman projection: scaling all components by the same
+   per-node factor ``1/s(n)`` means categories whose flow makes
+   ``s(n) > 1`` lose mass, while those that make ``s(n) < 1``
+   gain.  Empirically, per-category mass drifts up to ~30% over
+   1000 steps with non-trivial potentials.  This is not a bug; it
+   is the **simplex_projection** ledger event PR-B is meant to
+   record.  The shipped solver logs ``projection_mass_transfer[t,
+   c]`` (``(T, C)`` array of per-step per-category mass changes
+   induced by the projection) plus ``projection_mass_transfer_unknown[t]``,
+   alongside the existing ``floor_mass_inserted[t, c]`` from A.0.
+   The PR-B closure identity then holds *exactly* to floating
+   point:
+   ```
+   M_c(t+1) - M_c(t) == floor_mass_inserted[t, c] +
+                        projection_mass_transfer[t, c]
+   ```
+   This identity is pinned as test ``A3'`` in the shipped suite.
 
-* **A2** simplex residual `< 1e-9` per step on 20-node ring with 3 categories.
-* **A3** mass error per category `< 1e-7 × initial_mass_c` over 1000 steps.
-* **A2-extra (new)** with `V_c = 0` and `rho_unknown(0) = 0.5`, the
-  fixed point is `rho_c = 0.5 / n_categories` everywhere.
+3. **Initial-condition helper for tests/notebooks** (added).  The
+   simplex feasibility constraint at ``t = 0`` (``sum_c rho_c(n)
+   + rho_unknown(n) == 1`` per node) is fiddly to satisfy by hand,
+   so we ship :func:`make_concentrated_initial_state` that takes
+   ``num_nodes``, ``num_categories``, and
+   ``mass_unknown_fraction``, and returns a feasible
+   ``(rho, rho_unknown)`` pair with per-category Gaussian bumps
+   summing to the right total mass for the diffusion fixed point.
+
+Acceptance criteria as shipped:
+
+* **A2 (post-projection simplex residual).**  After every step the
+  per-node sum is within ``1e-9`` of 1 (in practice, FP noise
+  ~1e-15) on a 20-node ring with 3 active categories and
+  non-trivial potentials over 200 steps.  ✓
+* **A2-supplementary (pre-projection drift is a real signal).**
+  ``simplex_projection_drift`` is non-trivially populated
+  (max ``> 0``) and bounded above (max ``< 1``); finite at every
+  step.  Confirms PR-B's ledger has a real signal to balance.  ✓
+* **A3' (per-category ledger closure identity).**  On the same
+  20-node-ring, 3-category, 1000-step trajectory with non-zero
+  potentials: per-step per-category mass change matches
+  ``floor_mass_inserted + projection_mass_transfer`` to within
+  ``1e-9`` (machine epsilon for the algebraic identity).
+  Replaces the original ``mass error < 1e-7`` criterion which was
+  mathematically unachievable.  ✓
+* **A2-extra (uniform fixed point).**  Verified two ways:
+    1. The state ``rho_c = (1 - alpha)/C`` everywhere,
+       ``rho_unknown = alpha`` everywhere is an *exact* fixed
+       point (gradients vanish, ``u`` stays zero, projection is
+       the identity).  Verified to ``1e-12`` on a 500-step
+       integration.  ✓
+    2. A zero-sum-per-node perturbation of the uniform state
+       relaxes back toward uniform on a pure ring (no chords)
+       under ``V_c = 0``: max per-category deviation drops by
+       ``> 60%`` in 4000 steps at ``dt = 0.01``.  Tighter
+       convergence is dt-bounded by the simplex projection's
+       coupling between per-category diffusion modes.  ✓
+* **A2-extra-clarification.**  The original CR statement
+  "with ``V_c = 0`` and ``rho_unknown(0) = 0.5`` the fixed point
+  is uniform" implicitly assumed ``rho_unknown`` could
+  redistribute spatially.  Refinement 1 says it cannot.  So
+  reachability of the uniform fixed point depends on initial
+  conditions: starting from a state where ``rho_unknown`` is
+  already uniform (or where the per-node sum is already
+  uniform), the system relaxes to the uniform fixed point;
+  starting from spatially concentrated bumps with non-uniform
+  ``rho_unknown``, the dynamics relaxes to a *non-uniform*
+  fixed point compatible with the initial ``rho_unknown``
+  profile.  Both behaviours are physically correct.
+
+* **Broadcasting sanity.**  Two categories with identical
+  landscapes and identical initial conditions evolve identically
+  over 200 steps, to ``1e-12``.  Catches any accidental
+  category-axis bug.  ✓
+
+* **SparseFluidGraph reuse.**  Caller can pass a pre-built
+  :class:`SparseFluidGraph` to avoid rebuilding incidence; output
+  is bit-identical to the default code path.  ✓
 
 ### A.3 `heat_map_from_scene_graph` (UPDATED for missing footprints)
 
