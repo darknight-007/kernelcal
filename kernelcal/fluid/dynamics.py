@@ -138,7 +138,15 @@ class FluidSimulationConfig:
 
 @dataclass(frozen=True)
 class FluidSimulationResult:
-    """Time-series outputs and terminal state."""
+    """Time-series outputs and terminal state.
+
+    The ``floor_mass_inserted`` and ``renormalize_correction`` fields
+    are populated by both the legacy and PR-A.0 sparse solvers as
+    optional ledger signals (CR-2026-04-26 §2): every step that
+    applied the ``rho_floor`` clip or the post-step renormalisation
+    records the magnitude of the implicit mass injection / correction.
+    Legacy callers can ignore these fields.
+    """
 
     rho_history: np.ndarray
     flux_to_node_10: np.ndarray
@@ -150,6 +158,8 @@ class FluidSimulationResult:
     rho_final: np.ndarray
     u_final: np.ndarray
     phi_history: np.ndarray
+    floor_mass_inserted: np.ndarray = None  # type: ignore[assignment]
+    renormalize_correction: np.ndarray = None  # type: ignore[assignment]
 
 
 def ring_distance(num_nodes: int, i: int, j: int) -> int:
@@ -237,6 +247,8 @@ def simulate_kernel_fluid(
     entr = np.zeros(config.steps, dtype=float)
     m2 = np.zeros(config.steps, dtype=float)
     mass_err = np.zeros(config.steps, dtype=float)
+    floor_inserted = np.zeros(config.steps, dtype=float)
+    renorm_corr = np.zeros(config.steps, dtype=float)
 
     if track_rho_history:
         rho_hist[0] = rho
@@ -271,8 +283,19 @@ def simulate_kernel_fluid(
         for i in range(n):
             drho[i] = -np.sum([F[i, j] for j in graph.adjacency[i]])
         rho = rho + config.dt * drho
+        # PR-A.0 ledger signal: anything below the floor is implicitly
+        # mass-inserted; expose the magnitude rather than absorbing it
+        # silently.
+        below_floor = np.maximum(config.rho_floor - rho, 0.0)
+        floor_inserted[t] = float(np.sum(below_floor))
         rho = np.maximum(rho, config.rho_floor)
-        rho /= float(np.sum(rho))
+        # Post-floor renormalisation:  what we just changed by clipping
+        # plus any continuity-step floating-point drift gets folded back
+        # into the unit-mass simplex.  The correction's signed value is
+        # also a ledger signal.
+        mass_total = float(np.sum(rho))
+        renorm_corr[t] = mass_total - 1.0
+        rho /= mass_total
 
         # diagnostics
         flux10[t] = _net_inflow_to_node(F, 10, graph.adjacency[10]) if n > 10 else 0.0
@@ -295,6 +318,8 @@ def simulate_kernel_fluid(
         rho_final=rho.copy(),
         u_final=u.copy(),
         phi_history=phi_hist,
+        floor_mass_inserted=floor_inserted,
+        renormalize_correction=renorm_corr,
     )
 
 

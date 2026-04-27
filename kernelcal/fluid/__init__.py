@@ -18,6 +18,15 @@ from .dynamics import (
     simulate_kernel_fluid,
     save_timeseries_csv,
 )
+from .sparse import (
+    SparseFluidGraph,
+    continuity_drho,
+    edge_flux,
+    edge_gradient,
+    edge_laplacian_smoothing,
+    node_signed_inflow,
+    simulate_kernel_fluid_sparse,
+)
 
 
 def __getattr__(name: str):
@@ -37,5 +46,13 @@ __all__ = [
     "simulate_kernel_fluid",
     "save_timeseries_csv",
     "run_twenty_node_experiment",
+    # PR-A.0 sparse-Laplacian solver
+    "SparseFluidGraph",
+    "continuity_drho",
+    "edge_flux",
+    "edge_gradient",
+    "edge_laplacian_smoothing",
+    "node_signed_inflow",
+    "simulate_kernel_fluid_sparse",
 ]
 
